@@ -41,3 +41,101 @@ metadata = metadata.set_index("cell_id")
 
 metadata
 
+expression = pd.DataFrame({
+    "APOE":   [2.4, 2.1, 1.4, 1.2, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.2, 0.1],
+    "TREM2":  [3.0, 2.7, 1.2, 1.0, 0.2, 0.1, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0],
+    "C1QA":   [2.2, 2.0, 1.7, 1.5, 0.2, 0.2, 0.1, 0.1, 0.0, 0.0, 0.0, 0.0],
+    "HMOX1":  [1.5, 1.2, 0.6, 0.4, 1.0, 0.9, 0.3, 0.2, 0.2, 0.2, 0.1, 0.1],
+    "GFAP":   [0.2, 0.2, 0.1, 0.1, 3.3, 3.1, 2.0, 1.8, 0.1, 0.1, 0.1, 0.1],
+    "SNAP25": [0.1, 0.1, 0.1, 0.1, 0.2, 0.2, 0.1, 0.1, 4.0, 3.8, 3.6, 3.7]
+}, index=metadata.index)
+
+expression
+
+expression.loc["cell_01", "APOE"]
+
+combined=metadata.join(expression)
+target_gene="TREM2"
+print('target gene=', target_gene)
+
+np.random.seed(42)
+
+n_mask = 4
+
+mask_cells = np.random.choice(
+    expression.index,
+    size=n_mask,
+    replace=False
+)
+
+ground_truth = expression.loc[mask_cells, target_gene].copy()
+
+expression_masked = expression.copy()
+expression_masked.loc[mask_cells, target_gene] = np.nan
+
+print("Masked cells:")
+print(mask_cells)
+
+print("\nGround truth:")
+print(ground_truth)
+
+expression_masked
+
+global_mean_prediction = expression_masked[target_gene].mean()
+
+print("Global mean prediction:", global_mean_prediction)
+predictions = pd.Series(
+    global_mean_prediction,
+    index=mask_cells,
+    name="predicted_TREM2"
+)
+
+results = pd.DataFrame({
+    "true_TREM2": ground_truth,
+    "predicted_TREM2": predictions
+})
+
+results["error"] = results["predicted_TREM2"] - results["true_TREM2"]
+results["absolute_error"] = results["error"].abs()
+
+results
+mae = results["absolute_error"].mean()
+mse = (results["error"] ** 2).mean()
+
+print("MAE:", mae)
+print("MSE:", mse)
+
+#加上细胞类型
+def predict_by_cell_type(cell_id):
+    cell_type = metadata.loc[cell_id, "cell_type"]
+    
+    same_type_cells = metadata.index[metadata["cell_type"] == cell_type]
+    
+    available_values = expression_masked.loc[same_type_cells, target_gene].dropna()
+    
+    prediction = available_values.mean()
+    
+    return prediction
+
+
+celltype_predictions = pd.Series(
+    {cell_id: predict_by_cell_type(cell_id) for cell_id in mask_cells},
+    name="celltype_mean_prediction"
+)
+
+celltype_results = pd.DataFrame({
+    "cell_type": metadata.loc[mask_cells, "cell_type"],
+    "true_TREM2": ground_truth,
+    "predicted_TREM2": celltype_predictions
+})
+
+celltype_results["error"] = celltype_results["predicted_TREM2"] - celltype_results["true_TREM2"]
+celltype_results["absolute_error"] = celltype_results["error"].abs()
+
+celltype_results
+celltype_mae = celltype_results["absolute_error"].mean()
+celltype_mse = (celltype_results["error"] ** 2).mean()
+
+print("Cell-type mean baseline")
+print("MAE:", celltype_mae)
+print("MSE:", celltype_mse)
