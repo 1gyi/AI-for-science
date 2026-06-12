@@ -1131,7 +1131,7 @@ plt.xticks(rotation=45, ha="right")
 plt.tight_layout()
 plt.show()
 
-
+#学学真实数据集中的Anndata格式并把我的数据转换成真是数据集
 
 
 
