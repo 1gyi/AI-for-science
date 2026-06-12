@@ -397,16 +397,739 @@ comparison.sort_values("MAE")
 
 
 
+###多次重复的随机mask
+#导入额外工具
+from sklearn.exceptions import NotFittedError
+
+print("Ready for repeated masking experiment")
 
 
+#设函数
+def run_one_mask_experiment(expression, metadata, target_gene, n_mask=4, seed=0):
+    """
+    Run one masked gene expression prediction experiment.
 
+    Parameters
+    ----------
+    expression:
+        Original complete cell x gene expression matrix.
 
+    metadata:
+        Cell metadata table.
 
+    target_gene:
+        Gene to mask and predict, e.g. "TREM2".
 
+    n_mask:
+        Number of cells to mask.
 
+    seed:
+        Random seed for reproducibility.
 
+    Returns
+    -------
+    comparison:
+        A DataFrame containing MAE and MSE for each model.
+    """
 
+    # -------------------------
+    # 1. Randomly choose masked cells
+    # -------------------------
+    rng = np.random.default_rng(seed)
 
+    mask_cells = rng.choice(
+        expression.index,
+        size=n_mask,
+        replace=False
+    )
+
+    # -------------------------
+    # 2. Save ground truth before masking
+    # -------------------------
+    ground_truth = expression.loc[mask_cells, target_gene].copy()
+
+    # -------------------------
+    # 3. Create masked expression matrix
+    # -------------------------
+    expression_masked = expression.copy()
+    expression_masked.loc[mask_cells, target_gene] = np.nan
+
+    # -------------------------
+    # 4. Define train/test cells
+    # -------------------------
+    train_cells = expression_masked.index[expression_masked[target_gene].notna()]
+    test_cells = expression_masked.index[expression_masked[target_gene].isna()]
+
+    y_train = expression_masked.loc[train_cells, target_gene]
+    y_test = ground_truth.loc[test_cells]
+
+    # -------------------------
+    # 5. Feature genes
+    # -------------------------
+    feature_genes = [gene for gene in expression.columns if gene != target_gene]
+
+    X_train_genes = expression_masked.loc[train_cells, feature_genes]
+    X_test_genes = expression_masked.loc[test_cells, feature_genes]
+
+    # ============================================================
+    # Model 1: global mean baseline
+    # ============================================================
+    global_mean_prediction = expression_masked[target_gene].mean()
+
+    global_predictions = pd.Series(
+        global_mean_prediction,
+        index=test_cells
+    )
+
+    global_mae = mean_absolute_error(y_test, global_predictions)
+    global_mse = mean_squared_error(y_test, global_predictions)
+
+    # ============================================================
+    # Model 2: cell-type mean baseline
+    # ============================================================
+    celltype_predictions = []
+
+    for cell_id in test_cells:
+        cell_type = metadata.loc[cell_id, "cell_type"]
+
+        same_type_cells = metadata.index[
+            metadata["cell_type"] == cell_type
+        ]
+
+        available_values = expression_masked.loc[
+            same_type_cells,
+            target_gene
+        ].dropna()
+
+        if len(available_values) > 0:
+            prediction = available_values.mean()
+        else:
+            prediction = global_mean_prediction
+
+        celltype_predictions.append(prediction)
+
+    celltype_predictions = pd.Series(
+        celltype_predictions,
+        index=test_cells
+    )
+
+    celltype_mae = mean_absolute_error(y_test, celltype_predictions)
+    celltype_mse = mean_squared_error(y_test, celltype_predictions)
+
+    # ============================================================
+    # Model 3: disease + cell-type mean baseline
+    # ============================================================
+    disease_celltype_predictions = []
+
+    for cell_id in test_cells:
+        disease = metadata.loc[cell_id, "disease"]
+        cell_type = metadata.loc[cell_id, "cell_type"]
+
+        same_group_cells = metadata.index[
+            (metadata["disease"] == disease) &
+            (metadata["cell_type"] == cell_type)
+        ]
+
+        available_values = expression_masked.loc[
+            same_group_cells,
+            target_gene
+        ].dropna()
+
+        if len(available_values) > 0:
+            prediction = available_values.mean()
+        else:
+            same_type_cells = metadata.index[
+                metadata["cell_type"] == cell_type
+            ]
+
+            available_values = expression_masked.loc[
+                same_type_cells,
+                target_gene
+            ].dropna()
+
+            if len(available_values) > 0:
+                prediction = available_values.mean()
+            else:
+                prediction = global_mean_prediction
+
+        disease_celltype_predictions.append(prediction)
+
+    disease_celltype_predictions = pd.Series(
+        disease_celltype_predictions,
+        index=test_cells
+    )
+
+    disease_celltype_mae = mean_absolute_error(y_test, disease_celltype_predictions)
+    disease_celltype_mse = mean_squared_error(y_test, disease_celltype_predictions)
+
+    # ============================================================
+    # Model 4: Ridge regression, genes only
+    # ============================================================
+    ridge_gene_model = make_pipeline(
+        StandardScaler(),
+        Ridge(alpha=1.0)
+    )
+
+    ridge_gene_model.fit(X_train_genes, y_train)
+
+    ridge_gene_predictions = ridge_gene_model.predict(X_test_genes)
+
+    ridge_gene_mae = mean_absolute_error(y_test, ridge_gene_predictions)
+    ridge_gene_mse = mean_squared_error(y_test, ridge_gene_predictions)
+
+    # ============================================================
+    # Model 5: Ridge regression, genes + metadata
+    # ============================================================
+    X_all = expression_masked[feature_genes].copy()
+    X_all["disease"] = metadata["disease"]
+    X_all["cell_type"] = metadata["cell_type"]
+
+    X_train_meta = X_all.loc[train_cells]
+    X_test_meta = X_all.loc[test_cells]
+
+    numeric_features = feature_genes
+    categorical_features = ["disease", "cell_type"]
+
+    preprocess = ColumnTransformer(
+        transformers=[
+            ("genes", StandardScaler(), numeric_features),
+            ("metadata", OneHotEncoder(handle_unknown="ignore"), categorical_features)
+        ]
+    )
+
+    ridge_meta_model = Pipeline(
+        steps=[
+            ("preprocess", preprocess),
+            ("ridge", Ridge(alpha=1.0))
+        ]
+    )
+
+    ridge_meta_model.fit(X_train_meta, y_train)
+
+    ridge_meta_predictions = ridge_meta_model.predict(X_test_meta)
+
+    ridge_meta_mae = mean_absolute_error(y_test, ridge_meta_predictions)
+    ridge_meta_mse = mean_squared_error(y_test, ridge_meta_predictions)
+
+    # -------------------------
+    # 6. Collect results
+    # -------------------------
+    comparison = pd.DataFrame({
+        "model": [
+            "global_mean",
+            "celltype_mean",
+            "disease_celltype_mean",
+            "ridge_genes_only",
+            "ridge_genes_metadata"
+        ],
+        "MAE": [
+            global_mae,
+            celltype_mae,
+            disease_celltype_mae,
+            ridge_gene_mae,
+            ridge_meta_mae
+        ],
+        "MSE": [
+            global_mse,
+            celltype_mse,
+            disease_celltype_mse,
+            ridge_gene_mse,
+            ridge_meta_mse
+        ],
+        "seed": seed
+    })
+
+    return comparison
+
+###先测试一下能不能跑x1
+one_result = run_one_mask_experiment(
+    expression=expression,
+    metadata=metadata,
+    target_gene="TREM2",
+    n_mask=4,
+    seed=0
+)
+
+one_result.sort_values("MAE")
+
+##重复30次
+all_results = []
+
+for seed in range(30):
+    result = run_one_mask_experiment(
+        expression=expression,
+        metadata=metadata,
+        target_gene="TREM2",
+        n_mask=4,
+        seed=seed
+    )
+
+    all_results.append(result)
+
+all_results = pd.concat(all_results, ignore_index=True)
+
+all_results
+
+#计算每个模型的平均表现
+all_results = []
+
+for seed in range(30):
+    result = run_one_mask_experiment(
+        expression=expression,
+        metadata=metadata,
+        target_gene="TREM2",
+        n_mask=4,
+        seed=seed
+    )
+
+    all_results.append(result)
+
+all_results = pd.concat(all_results, ignore_index=True)
+
+all_results
+
+#画图比较
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(8, 5))
+
+plt.bar(
+    summary["model"],
+    summary["mean_MAE"],
+    yerr=summary["std_MAE"],
+    capsize=5
+)
+
+plt.ylabel("MAE")
+plt.xlabel("Model")
+plt.title("Repeated masking benchmark for TREM2 prediction")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+plt.show()
+
+#做出结果之后可以看具体哪个部分不好
+all_results.sort_values("MAE", ascending=False).head(20)
+#运行这个看提供最多误差的
+bad_seed = (
+    all_results
+    .query("model == 'ridge_genes_metadata'")
+    .sort_values("MAE", ascending=False)
+    .iloc[0]["seed"]
+)
+
+bad_seed
+#在具体看
+#在这里seed13的误差太大了因此要把seed13剔除
+all_results_no_seed13 = all_results[all_results["seed"] != 13].copy()
+
+summary_no_seed13 = (
+    all_results_no_seed13
+    .groupby("model")
+    .agg(
+        mean_MAE=("MAE", "mean"),
+        std_MAE=("MAE", "std"),
+        mean_MSE=("MSE", "mean"),
+        std_MSE=("MSE", "std")
+    )
+    .reset_index()
+    .sort_values("mean_MAE")
+)
+
+summary_no_seed13
+
+#再比较一下删之前和之后
+summary_before_after = summary.merge(
+    summary_no_seed13,
+    on="model",
+    suffixes=("_with_seed13", "_without_seed13")
+)
+
+summary_before_after
+
+#KNN来看邻近的表达
+from sklearn.neighbors import KNeighborsRegressor
+
+knn_gene_model = make_pipeline(
+    StandardScaler(),
+    KNeighborsRegressor(
+        n_neighbors=3,
+        weights="distance"
+    )
+)
+
+knn_gene_model.fit(X_train, y_train)
+
+knn_predictions = knn_gene_model.predict(X_test)
+
+knn_results = pd.DataFrame({
+    "disease": metadata.loc[test_cells, "disease"],
+    "cell_type": metadata.loc[test_cells, "cell_type"],
+    "true_TREM2": y_test,
+    "predicted_TREM2": knn_predictions
+}, index=test_cells)
+
+knn_results["error"] = (
+    knn_results["predicted_TREM2"] -
+    knn_results["true_TREM2"]
+)
+
+knn_results["absolute_error"] = knn_results["error"].abs()
+
+knn_results
+
+knn_mae = mean_absolute_error(y_test, knn_predictions)
+knn_mse = mean_squared_error(y_test, knn_predictions)
+
+print("kNN genes-only")
+print("MAE:", knn_mae)
+print("MSE:", knn_mse)
+
+#把KNN也整合进30次重复的baseline里
+#第一步做stratified masking
+def choose_stratified_mask_cells(metadata, n_mask=4, seed=0):
+    rng = np.random.default_rng(seed)
+
+    group_to_cells = (
+        metadata
+        .reset_index()
+        .groupby(["disease", "cell_type"])["cell_id"]
+        .apply(list)
+    )
+
+    available_groups = group_to_cells.index.tolist()
+
+    if n_mask > len(available_groups):
+        raise ValueError(
+            f"n_mask={n_mask} is too large. "
+            f"There are only {len(available_groups)} disease-cell_type groups."
+        )
+
+    selected_group_indices = rng.choice(
+        len(available_groups),
+        size=n_mask,
+        replace=False
+    )
+
+    selected_groups = [available_groups[i] for i in selected_group_indices]
+
+    mask_cells = []
+
+    for group in selected_groups:
+        cells_in_group = group_to_cells.loc[group]
+
+        selected_cell = rng.choice(
+            cells_in_group,
+            size=1,
+            replace=False
+        )[0]
+
+        mask_cells.append(selected_cell)
+
+    return np.array(mask_cells)
+#然后写函数把那几种方法都用上
+def run_one_mask_experiment_v2(
+    expression,
+    metadata,
+    target_gene,
+    n_mask=4,
+    seed=0,
+    ridge_alpha=10.0,
+    clip_predictions=True
+):
+    # -------------------------
+    # 1. Stratified masking
+    # -------------------------
+    mask_cells = choose_stratified_mask_cells(
+        metadata=metadata,
+        n_mask=n_mask,
+        seed=seed
+    )
+
+    ground_truth = expression.loc[mask_cells, target_gene].copy()
+
+    expression_masked = expression.copy()
+    expression_masked.loc[mask_cells, target_gene] = np.nan
+
+    train_cells = expression_masked.index[
+        expression_masked[target_gene].notna()
+    ]
+
+    test_cells = expression_masked.index[
+        expression_masked[target_gene].isna()
+    ]
+
+    y_train = expression_masked.loc[train_cells, target_gene]
+    y_test = ground_truth.loc[test_cells]
+
+    feature_genes = [
+        gene for gene in expression.columns
+        if gene != target_gene
+    ]
+
+    X_train_genes = expression_masked.loc[train_cells, feature_genes]
+    X_test_genes = expression_masked.loc[test_cells, feature_genes]
+
+    results = []
+
+    # ============================================================
+    # Model 1: global mean
+    # ============================================================
+    global_mean_prediction = expression_masked[target_gene].mean()
+
+    global_predictions = pd.Series(
+        global_mean_prediction,
+        index=test_cells
+    )
+
+    results.append({
+        "model": "global_mean",
+        "MAE": mean_absolute_error(y_test, global_predictions),
+        "MSE": mean_squared_error(y_test, global_predictions),
+        "seed": seed
+    })
+
+    # ============================================================
+    # Model 2: cell-type mean
+    # ============================================================
+    celltype_predictions = []
+
+    for cell_id in test_cells:
+        cell_type = metadata.loc[cell_id, "cell_type"]
+
+        same_type_cells = metadata.index[
+            metadata["cell_type"] == cell_type
+        ]
+
+        available_values = expression_masked.loc[
+            same_type_cells,
+            target_gene
+        ].dropna()
+
+        if len(available_values) > 0:
+            prediction = available_values.mean()
+        else:
+            prediction = global_mean_prediction
+
+        celltype_predictions.append(prediction)
+
+    celltype_predictions = pd.Series(
+        celltype_predictions,
+        index=test_cells
+    )
+
+    results.append({
+        "model": "celltype_mean",
+        "MAE": mean_absolute_error(y_test, celltype_predictions),
+        "MSE": mean_squared_error(y_test, celltype_predictions),
+        "seed": seed
+    })
+
+    # ============================================================
+    # Model 3: disease + cell-type mean
+    # ============================================================
+    disease_celltype_predictions = []
+
+    for cell_id in test_cells:
+        disease = metadata.loc[cell_id, "disease"]
+        cell_type = metadata.loc[cell_id, "cell_type"]
+
+        same_group_cells = metadata.index[
+            (metadata["disease"] == disease) &
+            (metadata["cell_type"] == cell_type)
+        ]
+
+        available_values = expression_masked.loc[
+            same_group_cells,
+            target_gene
+        ].dropna()
+
+        if len(available_values) > 0:
+            prediction = available_values.mean()
+        else:
+            same_type_cells = metadata.index[
+                metadata["cell_type"] == cell_type
+            ]
+
+            available_values = expression_masked.loc[
+                same_type_cells,
+                target_gene
+            ].dropna()
+
+            if len(available_values) > 0:
+                prediction = available_values.mean()
+            else:
+                prediction = global_mean_prediction
+
+        disease_celltype_predictions.append(prediction)
+
+    disease_celltype_predictions = pd.Series(
+        disease_celltype_predictions,
+        index=test_cells
+    )
+
+    results.append({
+        "model": "disease_celltype_mean",
+        "MAE": mean_absolute_error(y_test, disease_celltype_predictions),
+        "MSE": mean_squared_error(y_test, disease_celltype_predictions),
+        "seed": seed
+    })
+
+    # ============================================================
+    # Model 4: Ridge genes only
+    # ============================================================
+    ridge_gene_model = make_pipeline(
+        StandardScaler(),
+        Ridge(alpha=ridge_alpha)
+    )
+
+    ridge_gene_model.fit(X_train_genes, y_train)
+
+    ridge_gene_predictions = ridge_gene_model.predict(X_test_genes)
+
+    if clip_predictions:
+        ridge_gene_predictions = np.clip(ridge_gene_predictions, 0, None)
+
+    results.append({
+        "model": "ridge_genes_only",
+        "MAE": mean_absolute_error(y_test, ridge_gene_predictions),
+        "MSE": mean_squared_error(y_test, ridge_gene_predictions),
+        "seed": seed
+    })
+
+    # ============================================================
+    # Model 5: Ridge genes + metadata
+    # ============================================================
+    X_all = expression_masked[feature_genes].copy()
+    X_all["disease"] = metadata["disease"]
+    X_all["cell_type"] = metadata["cell_type"]
+
+    X_train_meta = X_all.loc[train_cells]
+    X_test_meta = X_all.loc[test_cells]
+
+    numeric_features = feature_genes
+    categorical_features = ["disease", "cell_type"]
+
+    preprocess = ColumnTransformer(
+        transformers=[
+            ("genes", StandardScaler(), numeric_features),
+            ("metadata", OneHotEncoder(handle_unknown="ignore"), categorical_features)
+        ]
+    )
+
+    ridge_meta_model = Pipeline(
+        steps=[
+            ("preprocess", preprocess),
+            ("ridge", Ridge(alpha=ridge_alpha))
+        ]
+    )
+
+    ridge_meta_model.fit(X_train_meta, y_train)
+
+    ridge_meta_predictions = ridge_meta_model.predict(X_test_meta)
+
+    if clip_predictions:
+        ridge_meta_predictions = np.clip(ridge_meta_predictions, 0, None)
+
+    results.append({
+        "model": "ridge_genes_metadata",
+        "MAE": mean_absolute_error(y_test, ridge_meta_predictions),
+        "MSE": mean_squared_error(y_test, ridge_meta_predictions),
+        "seed": seed
+    })
+
+    # ============================================================
+    # Model 6: kNN genes only
+    # ============================================================
+    knn_gene_model = make_pipeline(
+        StandardScaler(),
+        KNeighborsRegressor(
+            n_neighbors=3,
+            weights="distance"
+        )
+    )
+
+    knn_gene_model.fit(X_train_genes, y_train)
+
+    knn_predictions = knn_gene_model.predict(X_test_genes)
+
+    if clip_predictions:
+        knn_predictions = np.clip(knn_predictions, 0, None)
+
+    results.append({
+        "model": "knn_genes_only",
+        "MAE": mean_absolute_error(y_test, knn_predictions),
+        "MSE": mean_squared_error(y_test, knn_predictions),
+        "seed": seed
+    })
+
+    return pd.DataFrame(results)
+#测试一次循环看看seed13还炸不炸
+test_result_v2 = run_one_mask_experiment_v2(
+    expression=expression,
+    metadata=metadata,
+    target_gene="TREM2",
+    n_mask=4,
+    seed=13,
+    ridge_alpha=10.0,
+    clip_predictions=True
+)
+
+test_result_v2.sort_values("MAE")
+#循环30次看看表现
+all_results_v2 = []
+
+for seed in range(30):
+    result = run_one_mask_experiment_v2(
+        expression=expression,
+        metadata=metadata,
+        target_gene="TREM2",
+        n_mask=4,
+        seed=seed,
+        ridge_alpha=10.0,
+        clip_predictions=True
+    )
+
+    all_results_v2.append(result)
+
+all_results_v2 = pd.concat(
+    all_results_v2,
+    ignore_index=True
+)
+
+all_results_v2
+#看看表现可视化
+summary_v2 = (
+    all_results_v2
+    .groupby("model")
+    .agg(
+        mean_MAE=("MAE", "mean"),
+        std_MAE=("MAE", "std"),
+        mean_MSE=("MSE", "mean"),
+        std_MSE=("MSE", "std")
+    )
+    .reset_index()
+    .sort_values("mean_MAE")
+)
+
+summary_v2
+#画图总结
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(9, 5))
+
+plt.bar(
+    summary_v2["model"],
+    summary_v2["mean_MAE"],
+    yerr=summary_v2["std_MAE"],
+    capsize=5
+)
+
+plt.ylabel("Mean MAE")
+plt.xlabel("Model")
+plt.title("Repeated stratified masking benchmark for TREM2 prediction")
+plt.xticks(rotation=45, ha="right")
+plt.tight_layout()
+plt.show()
 
 
 
