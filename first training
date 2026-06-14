@@ -1132,6 +1132,745 @@ plt.tight_layout()
 plt.show()
 
 #学学真实数据集中的Anndata格式并把我的数据转换成真是数据集
+# Cell 4: create AnnData object
+# -----------------------------
+adata = ad.AnnData(
+    X=expression.values,
+    obs=metadata.copy(),
+    var=pd.DataFrame(index=expression.columns)
+)
+
+adata
+
+
+# -----------------------------
+# Cell 5: extract expression and metadata from AnnData
+# -----------------------------
+def extract_tables_from_adata(adata):
+    """
+    Convert AnnData object into expression DataFrame and metadata DataFrame.
+    """
+
+    if sp.issparse(adata.X):
+        X = adata.X.toarray()
+    else:
+        X = np.asarray(adata.X)
+
+    expression_df = pd.DataFrame(
+        X,
+        index=adata.obs_names,
+        columns=adata.var_names
+    )
+
+    metadata_df = adata.obs.copy()
+    metadata_df.index.name = "cell_id"
+
+    return expression_df, metadata_df
+
+
+expression_from_adata, metadata_from_adata = extract_tables_from_adata(adata)
+
+print("Expression shape:", expression_from_adata.shape)
+print("Metadata shape:", metadata_from_adata.shape)
+
+expression_from_adata.head()
+
+
+# -----------------------------
+# Cell 6: check target gene
+# -----------------------------
+target_gene = "TREM2"
+
+print("Is target gene in adata.var_names?")
+print(target_gene in adata.var_names)
+
+#对初始数据集进行数据控制, log1p等等
+这里我们创建新的数据集来练
+# Cell 15: create toy raw counts
+# -----------------------------
+raw_counts = pd.DataFrame({
+    "APOE":   [240, 210, 140, 120,  60,  50,  40,  30,  20,  10,  20,  10],
+    "TREM2":  [300, 270, 120, 100,  20,  10,  10,  10,   0,   0,   0,   0],
+    "C1QA":   [220, 200, 170, 150,  20,  20,  10,  10,   0,   0,   0,   0],
+    "HMOX1":  [150, 120,  60,  40, 100,  90,  30,  20,  20,  20,  10,  10],
+    "GFAP":   [ 20,  20,  10,  10, 330, 310, 200, 180,  10,  10,  10,  10],
+    "SNAP25": [ 10,  10,  10,  10,  20,  20,  10,  10, 400, 380, 360, 370]
+}, index=metadata.index)
+
+raw_counts
+# -----------------------------
+# Cell 16: calculate QC metrics
+# -----------------------------
+cell_total_counts = raw_counts.sum(axis=1)
+n_genes_detected = (raw_counts > 0).sum(axis=1)
+
+qc_table = pd.DataFrame({
+    "total_counts": cell_total_counts,
+    "n_genes_detected": n_genes_detected
+})
+
+qc_table
+# -----------------------------
+# Cell 17: normalize total counts
+# -----------------------------
+target_sum = 10000
+
+normalized_counts = raw_counts.div(
+    raw_counts.sum(axis=1),
+    axis=0
+) * target_sum
+
+normalized_counts
+# -----------------------------
+# Cell 18: check normalization
+# -----------------------------
+normalized_counts.sum(axis=1)
+
+# Cell 19: log1p transform
+# -----------------------------
+log_normalized = np.log1p(normalized_counts)
+
+log_normalized
+# -----------------------------
+# Cell 20: create AnnData with layers
+# -----------------------------
+adata_preprocessed = ad.AnnData(
+    X=log_normalized.values,
+    obs=metadata.copy(),
+    var=pd.DataFrame(index=raw_counts.columns)
+)
+
+# Store different expression versions
+adata_preprocessed.layers["counts"] = raw_counts.values
+adata_preprocessed.layers["normalized"] = normalized_counts.values
+adata_preprocessed.layers["log1p"] = log_normalized.values
+
+# Store QC metrics in obs
+adata_preprocessed.obs["total_counts"] = raw_counts.sum(axis=1)
+adata_preprocessed.obs["n_genes_detected"] = (raw_counts > 0).sum(axis=1)
+
+adata_preprocessed
+# -----------------------------
+# Cell 21: inspect layers and obs
+# -----------------------------
+print("Layers:")
+print(adata_preprocessed.layers.keys())
+
+print("\nobs:")
+display(adata_preprocessed.obs)
+
+print("\nvar names:")
+print(adata_preprocessed.var_names)
+# -----------------------------
+# Cell 22: extract expression from selected layer
+# -----------------------------
+def extract_tables_from_adata_v2(adata, layer=None):
+    """
+    Convert AnnData object into expression DataFrame and metadata DataFrame.
+
+    Parameters
+    ----------
+    adata:
+        AnnData object.
+
+    layer:
+        If None, use adata.X.
+        If string, use adata.layers[layer].
+    """
+
+    if layer is None:
+        X_source = adata.X
+    else:
+        if layer not in adata.layers.keys():
+            raise ValueError(
+                f"Layer '{layer}' is not found. "
+                f"Available layers are: {list(adata.layers.keys())}"
+            )
+        X_source = adata.layers[layer]
+
+    if sp.issparse(X_source):
+        X = X_source.toarray()
+    else:
+        X = np.asarray(X_source)
+
+    expression_df = pd.DataFrame(
+        X,
+        index=adata.obs_names,
+        columns=adata.var_names
+    )
+
+    metadata_df = adata.obs.copy()
+    metadata_df.index.name = "cell_id"
+
+    return expression_df, metadata_df
+# -----------------------------
+# Cell 23: extract counts layer
+# -----------------------------
+counts_df, metadata_preprocessed = extract_tables_from_adata_v2(
+    adata_preprocessed,
+    layer="counts"
+)
+
+counts_df
+# -----------------------------
+# Cell 24: extract log1p layer
+# -----------------------------
+log1p_df, metadata_preprocessed = extract_tables_from_adata_v2(
+    adata_preprocessed,
+    layer="log1p"
+)
+
+log1p_df
+# -----------------------------
+# Cell 25: run one experiment using log1p layer
+# -----------------------------
+one_result_log1p = run_one_mask_experiment_v2(
+    expression=log1p_df,
+    metadata=metadata_preprocessed,
+    target_gene="TREM2",
+    n_mask=4,
+    seed=0,
+    ridge_alpha=10.0,
+    clip_predictions=True
+)
+
+one_result_log1p.sort_values("MAE")
+
+# -----------------------------
+# Cell 26: repeated benchmark from selected AnnData layer
+# -----------------------------
+def run_repeated_benchmark_from_adata_v2(
+    adata,
+    target_gene,
+    layer=None,
+    n_mask=4,
+    n_repeats=30,
+    ridge_alpha=10.0,
+    clip_predictions=True
+):
+    """
+    Run repeated masked gene expression benchmark from AnnData.
+
+    If layer is None, use adata.X.
+    If layer is a string, use adata.layers[layer].
+    """
+
+    expression_df, metadata_df = extract_tables_from_adata_v2(
+        adata,
+        layer=layer
+    )
+
+    if target_gene not in expression_df.columns:
+        raise ValueError(
+            f"{target_gene} is not found in adata.var_names."
+        )
+
+    all_results = []
+
+    for seed in range(n_repeats):
+        result = run_one_mask_experiment_v2(
+            expression=expression_df,
+            metadata=metadata_df,
+            target_gene=target_gene,
+            n_mask=n_mask,
+            seed=seed,
+            ridge_alpha=ridge_alpha,
+            clip_predictions=clip_predictions
+        )
+
+        result["expression_source"] = "adata.X" if layer is None else layer
+
+        all_results.append(result)
+
+    all_results = pd.concat(
+        all_results,
+        ignore_index=True
+    )
+
+    summary = (
+        all_results
+        .groupby(["expression_source", "model"])
+        .agg(
+            mean_MAE=("MAE", "mean"),
+            std_MAE=("MAE", "std"),
+            mean_MSE=("MSE", "mean"),
+            std_MSE=("MSE", "std")
+        )
+        .reset_index()
+        .sort_values(["expression_source", "mean_MAE"])
+    )
+
+    return all_results, summary
+
+
+#拿到数据后检查anndata能不能用于分析
+anndata总检察函数
+def inspect_adata(adata, target_gene=None):
+    """
+    Inspect an AnnData object before running masked gene prediction benchmark.
+    """
+
+    print("===== Basic shape =====")
+    print("Number of cells:", adata.n_obs)
+    print("Number of genes:", adata.n_vars)
+    print()
+
+    print("===== X matrix =====")
+    print("adata.X type:", type(adata.X))
+    print("adata.X shape:", adata.X.shape)
+
+    if sp.issparse(adata.X):
+        print("adata.X is sparse matrix")
+        print("Number of non-zero values:", adata.X.nnz)
+        print("Density:", adata.X.nnz / (adata.X.shape[0] * adata.X.shape[1]))
+    else:
+        print("adata.X is dense matrix")
+        print("Min value:", np.min(adata.X))
+        print("Max value:", np.max(adata.X))
+    print()
+
+    print("===== obs: cell metadata =====")
+    print("Number of obs columns:", adata.obs.shape[1])
+    print("obs columns:")
+    print(list(adata.obs.columns))
+    print()
+
+    print("First 5 rows of adata.obs:")
+    display(adata.obs.head())
+    print()
+
+    print("===== var: gene metadata =====")
+    print("Number of var columns:", adata.var.shape[1])
+    print("var columns:")
+    print(list(adata.var.columns))
+    print()
+
+    print("First 10 gene names:")
+    print(list(adata.var_names[:10]))
+    print()
+
+    print("===== layers =====")
+    print("Available layers:")
+    print(list(adata.layers.keys()))
+    print()
+
+    print("===== raw =====")
+    if adata.raw is None:
+        print("adata.raw is None")
+    else:
+        print("adata.raw exists")
+        print("adata.raw shape:", adata.raw.shape)
+    print()
+
+    if target_gene is not None:
+        print("===== target gene check =====")
+        print("Target gene:", target_gene)
+        print("In adata.var_names?", target_gene in adata.var_names)
+
+        if adata.raw is not None:
+            print("In adata.raw.var_names?", target_gene in adata.raw.var_names)
+
+#帮忙在obs里找到可能的表签的函数
+def find_possible_obs_columns(adata):
+    """
+    Find possible disease, cell type, donor, batch columns in adata.obs.
+    """
+
+    obs_columns = list(adata.obs.columns)
+
+    keywords = {
+        "disease_or_condition": ["disease", "condition", "diagnosis", "status", "case_control"],
+        "cell_type": ["cell_type", "celltype", "cell type", "annotation", "cluster", "subclass", "class"],
+        "donor_or_sample": ["donor", "subject", "individual", "sample", "patient", "case"],
+        "batch": ["batch", "library", "platform", "site", "study"]
+    }
+
+    matches = {}
+
+    for category, words in keywords.items():
+        matched_columns = []
+
+        for col in obs_columns:
+            col_lower = col.lower()
+
+            for word in words:
+                if word in col_lower:
+                    matched_columns.append(col)
+                    break
+
+        matches[category] = matched_columns
+
+    return matches
+
+#检查target gene表达值
+def inspect_target_gene_expression(adata, target_gene, layer=None):
+    """
+    Inspect expression distribution of a target gene.
+    """
+
+    if target_gene not in adata.var_names:
+        raise ValueError(f"{target_gene} is not in adata.var_names.")
+
+    if layer is None:
+        X_source = adata[:, target_gene].X
+        source_name = "adata.X"
+    else:
+        X_source = adata[:, target_gene].layers[layer]
+        source_name = f"adata.layers['{layer}']"
+
+    if sp.issparse(X_source):
+        values = X_source.toarray().ravel()
+    else:
+        values = np.asarray(X_source).ravel()
+
+    print("Expression source:", source_name)
+    print("Target gene:", target_gene)
+    print("Number of cells:", len(values))
+    print("Min:", values.min())
+    print("Max:", values.max())
+    print("Mean:", values.mean())
+    print("Number of zeros:", np.sum(values == 0))
+    print("Fraction zeros:", np.mean(values == 0))
+
+    return pd.Series(values, index=adata.obs_names, name=target_gene)
+
+#真实数据里需要分别考虑一个细胞中donor batch等不同的特征因此需要对这些特征分类
+这里先donor
+这是donor的提取函数
+def choose_donor_heldout_mask_cells(metadata, donor_col="donor", seed=0):
+    """
+    Choose all cells from one donor as masked test cells.
+
+    This creates a donor-held-out split:
+    - test cells come from one donor
+    - training cells come from all other donors
+    """
+
+    rng = np.random.default_rng(seed)
+
+    donors = metadata[donor_col].unique()
+
+    selected_donor = rng.choice(donors)
+
+    mask_cells = metadata.index[
+        metadata[donor_col] == selected_donor
+    ].to_numpy()
+
+    return mask_cells, selected_donor
+
+
+mask_cells_donor, selected_donor = choose_donor_heldout_mask_cells(
+    metadata=metadata_preprocessed,
+    donor_col="donor",
+    seed=0
+)
+
+print("Selected donor:", selected_donor)
+
+metadata_preprocessed.loc[mask_cells_donor]
+#看这些donor的训练集和测试集
+
+test_cells = mask_cells_donor
+
+train_cells = metadata_preprocessed.index[
+    ~metadata_preprocessed.index.isin(test_cells)
+]
+
+print("Train donors:")
+print(metadata_preprocessed.loc[train_cells, "donor"].value_counts())
+
+print("\nTest donors:")
+print(metadata_preprocessed.loc[test_cells, "donor"].value_counts())
+
+print("\nTrain cell types:")
+print(metadata_preprocessed.loc[train_cells, "cell_type"].value_counts())
+
+print("\nTest cell types:")
+print(metadata_preprocessed.loc[test_cells, "cell_type"].value_counts())
+
+修改函数从donor来分析
+def run_one_mask_experiment_v4(
+    expression,
+    metadata,
+    target_gene,
+    feature_genes=None,
+    mask_strategy="stratified",
+    donor_col="donor",
+    n_mask=4,
+    seed=0,
+    ridge_alpha=10.0,
+    clip_predictions=True
+):
+    # -------------------------
+    # 1. Choose masked cells
+    # -------------------------
+    if mask_strategy == "stratified":
+        mask_cells = choose_stratified_mask_cells(
+            metadata=metadata,
+            n_mask=n_mask,
+            seed=seed
+        )
+        split_info = "stratified"
+
+    elif mask_strategy == "donor_heldout":
+        mask_cells, selected_donor = choose_donor_heldout_mask_cells(
+            metadata=metadata,
+            donor_col=donor_col,
+            seed=seed
+        )
+        split_info = f"donor_heldout:{selected_donor}"
+
+    else:
+        raise ValueError(
+            "mask_strategy must be either 'stratified' or 'donor_heldout'."
+        )
+
+    # -------------------------
+    # 2. Mask target gene
+    # -------------------------
+    ground_truth = expression.loc[mask_cells, target_gene].copy()
+
+    expression_masked = expression.copy()
+    expression_masked.loc[mask_cells, target_gene] = np.nan
+
+    train_cells = expression_masked.index[
+        expression_masked[target_gene].notna()
+    ]
+
+    test_cells = expression_masked.index[
+        expression_masked[target_gene].isna()
+    ]
+
+    y_train = expression_masked.loc[train_cells, target_gene]
+    y_test = ground_truth.loc[test_cells]
+
+    # -------------------------
+    # 3. Feature genes
+    # -------------------------
+    if feature_genes is None:
+        candidate_genes = expression.columns
+    else:
+        candidate_genes = feature_genes
+
+    feature_genes = [
+        gene for gene in candidate_genes
+        if gene != target_gene
+    ]
+
+    X_train_genes = expression_masked.loc[train_cells, feature_genes]
+    X_test_genes = expression_masked.loc[test_cells, feature_genes]
+
+    results = []
+
+    # ============================================================
+    # Model 1: global mean
+    # ============================================================
+    global_mean_prediction = expression_masked[target_gene].mean()
+
+    global_predictions = pd.Series(
+        global_mean_prediction,
+        index=test_cells
+    )
+
+    results.append({
+        "model": "global_mean",
+        "MAE": mean_absolute_error(y_test, global_predictions),
+        "MSE": mean_squared_error(y_test, global_predictions),
+        "seed": seed,
+        "n_features": len(feature_genes),
+        "mask_strategy": mask_strategy,
+        "split_info": split_info
+    })
+
+    # ============================================================
+    # Model 2: cell-type mean
+    # ============================================================
+    celltype_predictions = []
+
+    for cell_id in test_cells:
+        cell_type = metadata.loc[cell_id, "cell_type"]
+
+        same_type_cells = metadata.index[
+            metadata["cell_type"] == cell_type
+        ]
+
+        available_values = expression_masked.loc[
+            same_type_cells,
+            target_gene
+        ].dropna()
+
+        if len(available_values) > 0:
+            prediction = available_values.mean()
+        else:
+            prediction = global_mean_prediction
+
+        celltype_predictions.append(prediction)
+
+    celltype_predictions = pd.Series(
+        celltype_predictions,
+        index=test_cells
+    )
+
+    results.append({
+        "model": "celltype_mean",
+        "MAE": mean_absolute_error(y_test, celltype_predictions),
+        "MSE": mean_squared_error(y_test, celltype_predictions),
+        "seed": seed,
+        "n_features": len(feature_genes),
+        "mask_strategy": mask_strategy,
+        "split_info": split_info
+    })
+
+    # ============================================================
+    # Model 3: disease + cell-type mean
+    # ============================================================
+    disease_celltype_predictions = []
+
+    for cell_id in test_cells:
+        disease = metadata.loc[cell_id, "disease"]
+        cell_type = metadata.loc[cell_id, "cell_type"]
+
+        same_group_cells = metadata.index[
+            (metadata["disease"] == disease) &
+            (metadata["cell_type"] == cell_type)
+        ]
+
+        available_values = expression_masked.loc[
+            same_group_cells,
+            target_gene
+        ].dropna()
+
+        if len(available_values) > 0:
+            prediction = available_values.mean()
+        else:
+            same_type_cells = metadata.index[
+                metadata["cell_type"] == cell_type
+            ]
+
+            available_values = expression_masked.loc[
+                same_type_cells,
+                target_gene
+            ].dropna()
+
+            if len(available_values) > 0:
+                prediction = available_values.mean()
+            else:
+                prediction = global_mean_prediction
+
+        disease_celltype_predictions.append(prediction)
+
+    disease_celltype_predictions = pd.Series(
+        disease_celltype_predictions,
+        index=test_cells
+    )
+
+    results.append({
+        "model": "disease_celltype_mean",
+        "MAE": mean_absolute_error(y_test, disease_celltype_predictions),
+        "MSE": mean_squared_error(y_test, disease_celltype_predictions),
+        "seed": seed,
+        "n_features": len(feature_genes),
+        "mask_strategy": mask_strategy,
+        "split_info": split_info
+    })
+
+    # ============================================================
+    # Model 4: Ridge genes only
+    # ============================================================
+    ridge_gene_model = make_pipeline(
+        StandardScaler(),
+        Ridge(alpha=ridge_alpha)
+    )
+
+    ridge_gene_model.fit(X_train_genes, y_train)
+
+    ridge_gene_predictions = ridge_gene_model.predict(X_test_genes)
+
+    if clip_predictions:
+        ridge_gene_predictions = np.clip(ridge_gene_predictions, 0, None)
+
+    results.append({
+        "model": "ridge_genes_only",
+        "MAE": mean_absolute_error(y_test, ridge_gene_predictions),
+        "MSE": mean_squared_error(y_test, ridge_gene_predictions),
+        "seed": seed,
+        "n_features": len(feature_genes),
+        "mask_strategy": mask_strategy,
+        "split_info": split_info
+    })
+
+    # ============================================================
+    # Model 5: Ridge genes + metadata
+    # ============================================================
+    X_all = expression_masked[feature_genes].copy()
+    X_all["disease"] = metadata["disease"]
+    X_all["cell_type"] = metadata["cell_type"]
+
+    X_train_meta = X_all.loc[train_cells]
+    X_test_meta = X_all.loc[test_cells]
+
+    preprocess = ColumnTransformer(
+        transformers=[
+            ("genes", StandardScaler(), feature_genes),
+            ("metadata", make_onehot_encoder(), ["disease", "cell_type"])
+        ]
+    )
+
+    ridge_meta_model = Pipeline(
+        steps=[
+            ("preprocess", preprocess),
+            ("ridge", Ridge(alpha=ridge_alpha))
+        ]
+    )
+
+    ridge_meta_model.fit(X_train_meta, y_train)
+
+    ridge_meta_predictions = ridge_meta_model.predict(X_test_meta)
+
+    if clip_predictions:
+        ridge_meta_predictions = np.clip(ridge_meta_predictions, 0, None)
+
+    results.append({
+        "model": "ridge_genes_metadata",
+        "MAE": mean_absolute_error(y_test, ridge_meta_predictions),
+        "MSE": mean_squared_error(y_test, ridge_meta_predictions),
+        "seed": seed,
+        "n_features": len(feature_genes),
+        "mask_strategy": mask_strategy,
+        "split_info": split_info
+    })
+
+    # ============================================================
+    # Model 6: kNN genes only
+    # ============================================================
+    knn_gene_model = make_pipeline(
+        StandardScaler(),
+        KNeighborsRegressor(
+            n_neighbors=3,
+            weights="distance"
+        )
+    )
+
+    knn_gene_model.fit(X_train_genes, y_train)
+
+    knn_predictions = knn_gene_model.predict(X_test_genes)
+
+    if clip_predictions:
+        knn_predictions = np.clip(knn_predictions, 0, None)
+
+    results.append({
+        "model": "knn_genes_only",
+        "MAE": mean_absolute_error(y_test, knn_predictions),
+        "MSE": mean_squared_error(y_test, knn_predictions),
+        "seed": seed,
+        "n_features": len(feature_genes),
+        "mask_strategy": mask_strategy,
+        "split_info": split_info
+    })
+
+    return pd.DataFrame(results)
+
+
 
 
 
