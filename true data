@@ -1,1 +1,418 @@
+import pandas as pd
+import boto3
 
+from botocore import UNSIGNED
+from botocore.config import Config
+
+
+# =========================
+# 1. Connect to SEA-AD S3
+# =========================
+
+bucket_name = "sea-ad-single-cell-profiling"
+
+s3 = boto3.client(
+    "s3",
+    config=Config(signature_version=UNSIGNED)
+)
+
+print("Connected to bucket:", bucket_name)
+
+
+# =========================
+# 2. Helper functions
+# =========================
+
+def list_s3_folders(bucket_name, prefix=""):
+    """
+    List immediate subfolders under an S3 prefix.
+    """
+    folders = []
+
+    paginator = s3.get_paginator("list_objects_v2")
+
+    for page in paginator.paginate(
+        Bucket=bucket_name,
+        Prefix=prefix,
+        Delimiter="/"
+    ):
+        for item in page.get("CommonPrefixes", []):
+            folders.append(item["Prefix"])
+
+    return folders
+
+
+def list_s3_objects(bucket_name, prefix="", max_items=100000):
+    """
+    List objects under an S3 prefix.
+    """
+    objects = []
+
+    paginator = s3.get_paginator("list_objects_v2")
+
+    for page in paginator.paginate(
+        Bucket=bucket_name,
+        Prefix=prefix,
+        PaginationConfig={"MaxItems": max_items}
+    ):
+        for obj in page.get("Contents", []):
+            objects.append({
+                "key": obj["Key"],
+                "size_GB": obj["Size"] / 1e9,
+                "last_modified": obj["LastModified"]
+            })
+
+    return pd.DataFrame(objects)
+
+
+# =========================
+# 3. Show top-level folders
+# =========================
+
+print("\n===== top-level folders in bucket =====")
+
+top_folders = list_s3_folders(bucket_name)
+
+print("Number of top-level folders:", len(top_folders))
+
+for folder in top_folders:
+    print(folder)
+
+pd.DataFrame({"prefix": top_folders}).to_csv(
+    "sea_ad_top_folders.csv",
+    index=False
+)
+
+print("\nSaved top-level folders to: sea_ad_top_folders.csv")
+
+
+# =========================
+# 4. Inspect microglia folder
+# =========================
+
+target_prefix = "Microglia-and-Immune-for-AAIC/"
+
+print("\n===== inspect target folder =====")
+print("Target prefix:", target_prefix)
+
+subfolders = list_s3_folders(bucket_name, target_prefix)
+
+print("\nImmediate subfolders:")
+print("Number of subfolders:", len(subfolders))
+
+for folder in subfolders:
+    print(folder)
+
+
+micro_folder_table = list_s3_objects(
+    bucket_name=bucket_name,
+    prefix=target_prefix,
+    max_items=100000
+)
+
+print("\nNumber of objects under target prefix:", len(micro_folder_table))
+
+if len(micro_folder_table) == 0:
+    print("No objects found under target prefix. Stop here.")
+else:
+    micro_folder_table.to_csv(
+        "sea_ad_microglia_immune_folder_objects.csv",
+        index=False
+    )
+
+    print("\nSaved all objects to: sea_ad_microglia_immune_folder_objects.csv")
+
+    print("\n===== largest files under target prefix =====")
+    print(
+        micro_folder_table
+        .sort_values("size_GB", ascending=False)
+        .head(50)
+        .to_string(index=False)
+    )
+
+
+# =========================
+# 5. Find h5ad files
+# =========================
+
+if len(micro_folder_table) > 0:
+    h5ad_candidates = micro_folder_table[
+        micro_folder_table["key"].str.endswith(".h5ad", na=False)
+    ].copy()
+
+    print("\n===== h5ad candidates =====")
+    print("Number of h5ad files:", len(h5ad_candidates))
+
+    if len(h5ad_candidates) > 0:
+        h5ad_candidates = h5ad_candidates.sort_values(
+            "size_GB",
+            ascending=False
+        )
+
+        print(
+            h5ad_candidates
+            .to_string(index=False)
+        )
+
+        h5ad_candidates.to_csv(
+            "sea_ad_microglia_h5ad_candidates.csv",
+            index=False
+        )
+
+        print("\nSaved h5ad candidates to: sea_ad_microglia_h5ad_candidates.csv")
+
+    else:
+        print("No .h5ad files found under this prefix.")
+        print("Look at sea_ad_microglia_immune_folder_objects.csv instead.")
+
+        # =========================
+import os
+import numpy as np
+import pandas as pd
+import scanpy as sc
+import scipy.sparse as sp
+import boto3
+
+from botocore import UNSIGNED
+from botocore.config import Config
+
+# =========================
+# 6. Download selected h5ad
+# =========================
+
+selected_key = (
+    "Microglia-and-Immune-for-AAIC/"
+    "SEA-AD_Microglia-and-Immune_multi-regional_final-nuclei_AAIC-pre-release.2025-07-24.h5ad"
+)
+
+local_path = "SEA_AD_microglia_immune.h5ad"
+
+print("\n===== selected h5ad =====")
+print("S3 key:", selected_key)
+print("Local path:", local_path)
+
+if os.path.exists(local_path):
+    print("File already exists locally.")
+    print("Local size GB:", os.path.getsize(local_path) / 1e9)
+else:
+    print("Downloading h5ad file. This may take a while...")
+
+    s3.download_file(
+        Bucket=bucket_name,
+        Key=selected_key,
+        Filename=local_path
+    )
+
+    print("Download finished.")
+    print("Local size GB:", os.path.getsize(local_path) / 1e9)
+
+
+
+print("\n===== read h5ad in backed mode =====")
+
+adata = sc.read_h5ad(
+    local_path,
+    backed="r"
+)
+
+print(adata)
+print("n_obs / cells:", adata.n_obs)
+print("n_vars / genes:", adata.n_vars)
+
+
+print("\n===== X matrix =====")
+print("adata.X type:", type(adata.X))
+print("adata.X shape:", adata.X.shape)
+
+print("\n===== obs columns =====")
+obs_columns = list(adata.obs.columns)
+print("Number of obs columns:", len(obs_columns))
+
+for col in obs_columns:
+    print(col)
+
+pd.DataFrame({"obs_column": obs_columns}).to_csv(
+    "sea_ad_obs_columns.csv",
+    index=False
+)
+
+print("\nSaved obs columns to: sea_ad_obs_columns.csv")
+
+
+print("\n===== obs head =====")
+print(adata.obs.head().to_string())
+
+adata.obs.head(50).to_csv("sea_ad_obs_head.csv")
+print("\nSaved obs head to: sea_ad_obs_head.csv")
+
+
+print("\n===== var columns =====")
+var_columns = list(adata.var.columns)
+print("Number of var columns:", len(var_columns))
+
+for col in var_columns:
+    print(col)
+
+pd.DataFrame({"var_column": var_columns}).to_csv(
+    "sea_ad_var_columns.csv",
+    index=False
+)
+
+print("\nSaved var columns to: sea_ad_var_columns.csv")
+
+
+print("\n===== var head =====")
+print(adata.var.head().to_string())
+
+adata.var.head(50).to_csv("sea_ad_var_head.csv")
+print("\nSaved var head to: sea_ad_var_head.csv")
+
+
+print("\n===== first 30 gene names =====")
+print(list(adata.var_names[:30]))
+
+
+print("\n===== layers =====")
+print(list(adata.layers.keys()))
+
+
+print("\n===== raw =====")
+print("adata.raw is None:", adata.raw is None)
+
+if adata.raw is not None:
+    print("adata.raw shape:", adata.raw.shape)
+
+# =========================
+# 9. Check target marker genes
+# =========================
+
+homeostatic_panel = [
+    "P2RY12", "P2RY13", "TMEM119", "CX3CR1",
+    "SALL1", "GPR34", "OLFML3", "HEXB", "CSF1R"
+]
+
+dam_panel = [
+    "APOE", "TREM2", "TYROBP", "LPL", "CST7",
+    "ITGAX", "CD9", "SPP1", "CTSD", "GPNMB", "AXL"
+]
+
+complement_panel = [
+    "C1QA", "C1QB", "C1QC", "C3", "CFB",
+    "C1R", "C1S", "FCGR3A", "FCER1G", "LST1"
+]
+
+all_target_genes = sorted(
+    set(homeostatic_panel + dam_panel + complement_panel)
+)
+
+target_check = pd.DataFrame({
+    "gene": all_target_genes,
+    "in_var_names": [gene in adata.var_names for gene in all_target_genes]
+})
+
+print("\n===== target gene check =====")
+print(target_check.to_string(index=False))
+
+target_check.to_csv(
+    "sea_ad_target_gene_check.csv",
+    index=False
+)
+
+print("\nSaved target gene check to: sea_ad_target_gene_check.csv")
+
+# 10. Find possible metadata columns
+# =========================
+
+def find_possible_obs_columns(adata):
+    obs_columns = list(adata.obs.columns)
+
+    keywords = {
+        "donor": [
+            "donor", "subject", "individual",
+            "participant", "case", "specimen"
+        ],
+        "region": [
+            "region", "brain", "structure",
+            "area", "lobe", "roi"
+        ],
+        "disease_or_pathology": [
+            "disease", "diagnosis", "pathology",
+            "braak", "cerad", "adnc", "cps",
+            "cognitive", "condition", "status"
+        ],
+        "cell_type": [
+            "cell_type", "celltype", "subclass",
+            "supertype", "cluster", "annotation",
+            "class", "type"
+        ],
+        "batch": [
+            "batch", "library", "chemistry",
+            "platform", "method", "technology",
+            "lane"
+        ]
+    }
+
+    rows = []
+
+    for category, words in keywords.items():
+        for col in obs_columns:
+            col_lower = col.lower()
+
+            for word in words:
+                if word in col_lower:
+                    rows.append({
+                        "category": category,
+                        "matched_keyword": word,
+                        "obs_column": col
+                    })
+                    break
+
+    return pd.DataFrame(rows)
+
+
+possible_cols = find_possible_obs_columns(adata)
+
+print("\n===== possible obs columns =====")
+
+if len(possible_cols) > 0:
+    print(possible_cols.to_string(index=False))
+else:
+    print("No candidate columns found by keyword search.")
+
+possible_cols.to_csv(
+    "sea_ad_possible_obs_columns.csv",
+    index=False
+)
+
+print("\nSaved possible obs columns to: sea_ad_possible_obs_columns.csv")
+
+# =========================
+# 11. Inspect candidate column values
+# =========================
+
+candidate_columns = possible_cols["obs_column"].unique().tolist()
+
+print("\n===== candidate column values =====")
+
+summary_rows = []
+
+for col in candidate_columns:
+    value_counts = adata.obs[col].value_counts(dropna=False).head(20)
+
+    print("\n---", col, "---")
+    print(value_counts.to_string())
+
+    summary_rows.append({
+        "column": col,
+        "n_unique": adata.obs[col].nunique(dropna=False),
+        "top_values": "; ".join([str(x) for x in value_counts.index[:10]])
+    })
+
+candidate_summary = pd.DataFrame(summary_rows)
+
+candidate_summary.to_csv(
+    "sea_ad_candidate_column_summary.csv",
+    index=False
+)
+
+print("\nSaved candidate column summary to: sea_ad_candidate_column_summary.csv")
