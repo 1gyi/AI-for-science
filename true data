@@ -1,3 +1,4 @@
+这个就是一个从获取数据到"看一眼"数据的代码然后下载数据
 import pandas as pd
 import boto3
 
@@ -416,3 +417,1692 @@ candidate_summary.to_csv(
 )
 
 print("\nSaved candidate column summary to: sea_ad_candidate_column_summary.csv")
+
+#由于我需要设计四个小的下游task，因此我需要先看看在这个数据集里看看这几个参数，这几个特征，比如脑区，Braak等，在我的数据里有几种，比如说有几种脑区，几种认知表现等等
+# Step 2A: inspect key metadata feature levels
+# ============================================================
+
+import os
+import pandas as pd
+
+metadata_summary_dir = "outputs_metadata_summary"
+os.makedirs(metadata_summary_dir, exist_ok=True)
+
+# ----------------------------
+# 1. Define columns of interest
+# ----------------------------
+
+CORE_COLUMNS = {
+    "split_unit": [
+        "Donor ID",
+    ],
+    "cell_subset": [
+        "Brain Region",
+        "Subclass",
+        "Supertype",
+    ],
+    "ad_pathology": [
+        "Overall AD neuropathological Change",
+        "Thal",
+        "Braak",
+        "CERAD score",
+        "Overall CAA Score",
+        "Highest Lewy Body Disease",
+        "LATE",
+    ],
+    "cognition": [
+        "Cognitive Status",
+        "Last CASI Score",
+        "Last MMSE Score",
+        "Last MOCA Score",
+    ],
+    "genetic_risk": [
+        "APOE Genotype",
+    ],
+    "basic_covariates": [
+        "Sex",
+        "Age at Death",
+        "PMI",
+        "Brain pH",
+        "RIN",
+        "NeuN positive fraction on FANS",
+    ],
+    "technical_covariates": [
+        "cell_prep_type",
+        "method",
+        "batch_vendor_name",
+        "exp_component_vendor_name",
+        "library_prep",
+        "alignment",
+        "Genome",
+    ],
+}
+
+all_columns_to_check = []
+
+for group_name, columns in CORE_COLUMNS.items():
+    for col in columns:
+        all_columns_to_check.append((group_name, col))
+
+
+# ----------------------------
+# 2. Helper function
+# ----------------------------
+
+def summarize_column_levels(obs, col, group_name, donor_col="Donor ID"):
+    """
+    Summarize a metadata column at both cell level and donor level.
+
+    Cell-level count:
+        how many cells/nuclei have each value.
+
+    Donor-level count:
+        how many donors have each value.
+        This is important because donor-level variables are repeated
+        across many cells.
+    """
+
+    rows = []
+
+    if col not in obs.columns:
+        return pd.DataFrame([{
+            "group": group_name,
+            "column": col,
+            "level": "COLUMN_NOT_FOUND",
+            "n_cells": pd.NA,
+            "n_donors": pd.NA,
+            "fraction_cells": pd.NA,
+        }])
+
+    cell_counts = obs[col].value_counts(dropna=False)
+
+    for level, n_cells in cell_counts.items():
+        level_mask = obs[col].astype(str) == str(level)
+
+        if donor_col in obs.columns:
+            n_donors = obs.loc[level_mask, donor_col].nunique()
+        else:
+            n_donors = pd.NA
+
+        rows.append({
+            "group": group_name,
+            "column": col,
+            "level": level,
+            "n_cells": int(n_cells),
+            "n_donors": n_donors,
+            "fraction_cells": n_cells / obs.shape[0],
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ----------------------------
+# 3. Use full obs
+# ----------------------------
+
+obs = adata.obs.copy()
+
+print("\n===== Full dataset metadata summary =====")
+print("Total cells:", obs.shape[0])
+print("Total donors:", obs["Donor ID"].nunique() if "Donor ID" in obs.columns else "Donor ID not found")
+
+
+all_summary_tables = []
+
+for group_name, col in all_columns_to_check:
+    summary = summarize_column_levels(
+        obs=obs,
+        col=col,
+        group_name=group_name,
+        donor_col="Donor ID"
+    )
+
+    all_summary_tables.append(summary)
+
+metadata_levels_summary = pd.concat(
+    all_summary_tables,
+    ignore_index=True
+)
+
+metadata_levels_summary.to_csv(
+    os.path.join(metadata_summary_dir, "metadata_levels_summary_full_dataset.csv"),
+    index=False
+)
+
+print("\nSaved full metadata levels summary to:")
+print(os.path.join(metadata_summary_dir, "metadata_levels_summary_full_dataset.csv"))
+
+
+# ----------------------------
+# 4. Print the most important ones
+# ----------------------------
+
+IMPORTANT_PRINT_COLUMNS = [
+    "Brain Region",
+    "Supertype",
+    "Subclass",
+    "Braak",
+    "Overall AD neuropathological Change",
+    "Thal",
+    "CERAD score",
+    "Cognitive Status",
+    "APOE Genotype",
+    "Sex",
+]
+
+for col in IMPORTANT_PRINT_COLUMNS:
+    print("\n================================================")
+    print("COLUMN:", col)
+    print("================================================")
+
+    if col not in obs.columns:
+        print("Column not found.")
+        continue
+
+    tmp = metadata_levels_summary[
+        metadata_levels_summary["column"] == col
+    ].copy()
+
+    tmp = tmp.sort_values("n_cells", ascending=False)
+
+    print(
+        tmp[
+            ["level", "n_cells", "n_donors", "fraction_cells"]
+        ].to_string(index=False)
+    )
+
+
+# ----------------------------
+# 5. Donor-level metadata table
+# ----------------------------
+
+# These variables are mostly donor-level, so we should not count them
+# repeatedly by cell only.
+donor_level_cols = [
+    "Donor ID",
+    "Sex",
+    "Age at Death",
+    "PMI",
+    "Brain pH",
+    "Overall AD neuropathological Change",
+    "Thal",
+    "Braak",
+    "CERAD score",
+    "Overall CAA Score",
+    "Highest Lewy Body Disease",
+    "LATE",
+    "Cognitive Status",
+    "Last CASI Score",
+    "Last MMSE Score",
+    "Last MOCA Score",
+    "APOE Genotype",
+    "Primary Study Name",
+]
+
+donor_level_cols = [
+    col for col in donor_level_cols
+    if col in obs.columns
+]
+
+donor_metadata = (
+    obs[donor_level_cols]
+    .drop_duplicates(subset=["Donor ID"])
+    .copy()
+)
+
+donor_metadata.to_csv(
+    os.path.join(metadata_summary_dir, "donor_level_metadata.csv"),
+    index=False
+)
+
+print("\nSaved donor-level metadata to:")
+print(os.path.join(metadata_summary_dir, "donor_level_metadata.csv"))
+
+print("\n===== Donor-level counts for key variables =====")
+
+for col in [
+    "Braak",
+    "Overall AD neuropathological Change",
+    "Thal",
+    "CERAD score",
+    "Cognitive Status",
+    "APOE Genotype",
+    "Sex",
+]:
+    if col in donor_metadata.columns:
+        print("\n---", col, "---")
+        print(donor_metadata[col].value_counts(dropna=False).to_string())
+
+
+# ----------------------------
+# 6. Region x donor table
+# ----------------------------
+
+if "Brain Region" in obs.columns and "Donor ID" in obs.columns:
+    region_summary = (
+        obs
+        .groupby("Brain Region")
+        .agg(
+            n_cells=("Donor ID", "size"),
+            n_donors=("Donor ID", "nunique"),
+        )
+        .reset_index()
+        .sort_values("n_cells", ascending=False)
+    )
+
+    region_summary.to_csv(
+        os.path.join(metadata_summary_dir, "region_summary_cells_donors.csv"),
+        index=False
+    )
+
+    print("\n===== Brain Region summary =====")
+    print(region_summary.to_string(index=False))
+
+    print("\nSaved region summary to:")
+    print(os.path.join(metadata_summary_dir, "region_summary_cells_donors.csv"))
+
+
+# ----------------------------
+# 7. Region x pathology table
+# ----------------------------
+
+if (
+    "Brain Region" in obs.columns
+    and "Donor ID" in obs.columns
+    and "Braak" in obs.columns
+):
+    region_braak_summary = (
+        obs
+        .drop_duplicates(subset=["Donor ID", "Brain Region"])
+        .groupby(["Brain Region", "Braak"])
+        .agg(
+            n_donor_region_pairs=("Donor ID", "size"),
+            n_donors=("Donor ID", "nunique"),
+        )
+        .reset_index()
+        .sort_values(["Brain Region", "Braak"])
+    )
+
+    region_braak_summary.to_csv(
+        os.path.join(metadata_summary_dir, "region_braak_summary.csv"),
+        index=False
+    )
+
+    print("\nSaved region x Braak summary to:")
+    print(os.path.join(metadata_summary_dir, "region_braak_summary.csv"))
+
+#数据quality control还有确认目的基因
+# ============================================================
+# Step 3A: target gene QC in MTG Micro-PVM subset
+# ============================================================
+
+import os
+import numpy as np
+import pandas as pd
+import scipy.sparse as sp
+
+target_qc_dir = "outputs_target_gene_qc"
+os.makedirs(target_qc_dir, exist_ok=True)
+
+
+# ----------------------------
+# 1. Define pilot subset
+# ----------------------------
+
+DONOR_COL = "Donor ID"
+REGION_COL = "Brain Region"
+PATHOLOGY_COL = "Braak"
+CELLTYPE_COL = "Supertype"
+COUNTS_LAYER = "UMIs"
+
+PILOT_REGION = "MTG"
+
+is_micro_pvm = (
+    adata.obs[CELLTYPE_COL]
+    .astype(str)
+    .str.startswith("Micro-PVM")
+)
+
+is_pilot_region = (
+    adata.obs[REGION_COL]
+    .astype(str)
+    == PILOT_REGION
+)
+
+pilot_mask = is_micro_pvm & is_pilot_region
+pilot_obs = adata.obs.loc[pilot_mask].copy()
+
+print("\n===== Pilot subset for target gene QC =====")
+print("Region:", PILOT_REGION)
+print("Cells:", pilot_obs.shape[0])
+print("Donors:", pilot_obs[DONOR_COL].nunique())
+
+print("\nSupertype counts:")
+print(pilot_obs[CELLTYPE_COL].value_counts(dropna=False).to_string())
+
+print("\nBraak counts:")
+print(pilot_obs[PATHOLOGY_COL].value_counts(dropna=False).to_string())
+
+
+# ----------------------------
+# 2. Define biological target panels
+# ----------------------------
+
+PANELS = {
+    "homeostatic": [
+        "P2RY12", "TMEM119", "CX3CR1", "SALL1", "GPR34",
+        "OLFML3", "HEXB", "CSF1R", "MERTK", "SELPLG",
+    ],
+
+    "dam_activated": [
+        "APOE", "TREM2", "TYROBP", "ITGAX", "LPL", "SPP1",
+        "AXL", "CST7", "CD9", "CTSB", "CTSD", "LGALS3",
+    ],
+
+    "complement_phagocytosis": [
+        "C1QA", "C1QB", "C1QC", "C3", "CTSS", "FCGR3A",
+        "FCER1G", "MSR1", "VSIG4", "CD68", "GRN",
+    ],
+}
+
+gene_to_panel = {}
+
+for panel_name, genes in PANELS.items():
+    for gene in genes:
+        gene_to_panel[gene] = panel_name
+
+candidate_target_genes = list(gene_to_panel.keys())
+
+
+# ----------------------------
+# 3. Check which target genes exist
+# ----------------------------
+
+var_names = pd.Index(adata.var_names.astype(str))
+
+present_target_genes = [
+    gene for gene in candidate_target_genes
+    if gene in var_names
+]
+
+missing_target_genes = [
+    gene for gene in candidate_target_genes
+    if gene not in var_names
+]
+
+print("\n===== Target gene presence =====")
+print("Candidate target genes:", len(candidate_target_genes))
+print("Present target genes:", len(present_target_genes))
+print("Missing target genes:", missing_target_genes)
+
+gene_presence = pd.DataFrame({
+    "panel": [gene_to_panel[gene] for gene in candidate_target_genes],
+    "gene": candidate_target_genes,
+    "present": [gene in present_target_genes for gene in candidate_target_genes],
+})
+
+gene_presence.to_csv(
+    os.path.join(target_qc_dir, "sea_ad_panel_gene_presence.csv"),
+    index=False
+)
+
+
+# ----------------------------
+# 4. Load only pilot cells x target genes
+# ----------------------------
+
+print("\nLoading pilot cells x target genes...")
+
+adata_target = adata[
+    pilot_mask.values,
+    present_target_genes
+].to_memory()
+
+if COUNTS_LAYER in adata_target.layers.keys():
+    X_counts = adata_target.layers[COUNTS_LAYER]
+    print("Using counts layer:", COUNTS_LAYER)
+else:
+    X_counts = adata_target.X
+    print("Layer UMIs not found; using adata.X instead.")
+
+if sp.issparse(X_counts):
+    counts = X_counts.toarray()
+else:
+    counts = np.asarray(X_counts)
+
+counts = counts.astype(float)
+
+counts_df = pd.DataFrame(
+    counts,
+    index=adata_target.obs_names,
+    columns=present_target_genes
+)
+
+print("Target count matrix shape:", counts_df.shape)
+
+
+# ----------------------------
+# 5. Normalize target genes for QC
+# ----------------------------
+
+cell_total_counts = counts_df.sum(axis=1)
+
+# 注意：这里的 total counts 只基于 target genes，不是全基因 total UMIs。
+# 所以 log_expr 主要用于 target gene QC 的相对比较。
+# 正式建模时，我们会用全基因 UMIs 做 normalization。
+log_counts = np.log1p(counts_df)
+
+
+# ----------------------------
+# 6. Compute target gene QC
+# ----------------------------
+
+qc_rows = []
+
+for gene in present_target_genes:
+    raw_values = counts_df[gene]
+    log_values = log_counts[gene]
+
+    detection_rate = (raw_values > 0).mean()
+    n_expressing_cells = int((raw_values > 0).sum())
+
+    donor_df = pd.DataFrame({
+        DONOR_COL: adata_target.obs[DONOR_COL].values,
+        "log_expr": log_values.values
+    })
+
+    donor_means = (
+        donor_df
+        .groupby(DONOR_COL)["log_expr"]
+        .mean()
+    )
+
+    donor_mean_variance = donor_means.var()
+
+    if detection_rate < 0.01:
+        qc_decision = "drop"
+        reason = "very low detection rate"
+    elif detection_rate < 0.05:
+        qc_decision = "maybe_drop"
+        reason = "sparse target; inspect manually"
+    elif log_values.var() < 1e-8:
+        qc_decision = "maybe_drop"
+        reason = "near-zero variance"
+    else:
+        qc_decision = "keep"
+        reason = "passes basic detection and variance QC"
+
+    qc_rows.append({
+        "panel": gene_to_panel[gene],
+        "gene": gene,
+        "present": True,
+        "n_cells": counts_df.shape[0],
+        "n_expressing_cells": n_expressing_cells,
+        "detection_rate": detection_rate,
+        "mean_counts": raw_values.mean(),
+        "var_counts": raw_values.var(),
+        "mean_log1p_counts": log_values.mean(),
+        "var_log1p_counts": log_values.var(),
+        "donor_mean_variance": donor_mean_variance,
+        "qc_decision": qc_decision,
+        "reason": reason,
+    })
+
+for gene in missing_target_genes:
+    qc_rows.append({
+        "panel": gene_to_panel[gene],
+        "gene": gene,
+        "present": False,
+        "n_cells": np.nan,
+        "n_expressing_cells": np.nan,
+        "detection_rate": np.nan,
+        "mean_counts": np.nan,
+        "var_counts": np.nan,
+        "mean_log1p_counts": np.nan,
+        "var_log1p_counts": np.nan,
+        "donor_mean_variance": np.nan,
+        "qc_decision": "drop",
+        "reason": "gene not found in var_names",
+    })
+
+target_gene_qc = pd.DataFrame(qc_rows)
+
+target_gene_qc = target_gene_qc.sort_values(
+    ["panel", "qc_decision", "detection_rate"],
+    ascending=[True, True, False]
+)
+
+target_gene_qc_path = os.path.join(
+    target_qc_dir,
+    "sea_ad_target_gene_qc_mtg_micro_pvm.csv"
+)
+
+target_gene_qc.to_csv(
+    target_gene_qc_path,
+    index=False
+)
+
+print("\n===== Target gene QC =====")
+print(target_gene_qc.to_string(index=False))
+print("\nSaved target gene QC to:", target_gene_qc_path)
+
+
+# ----------------------------
+# 7. Panel-level QC summary
+# ----------------------------
+
+panel_qc_summary = (
+    target_gene_qc[target_gene_qc["present"] == True]
+    .groupby("panel")
+    .agg(
+        n_genes=("gene", "count"),
+        n_keep=("qc_decision", lambda x: (x == "keep").sum()),
+        n_maybe_drop=("qc_decision", lambda x: (x == "maybe_drop").sum()),
+        n_drop=("qc_decision", lambda x: (x == "drop").sum()),
+        mean_detection_rate=("detection_rate", "mean"),
+        median_detection_rate=("detection_rate", "median"),
+        mean_log1p_counts=("mean_log1p_counts", "mean"),
+        mean_var_log1p_counts=("var_log1p_counts", "mean"),
+    )
+    .reset_index()
+)
+
+panel_qc_path = os.path.join(
+    target_qc_dir,
+    "sea_ad_panel_qc_summary_mtg_micro_pvm.csv"
+)
+
+panel_qc_summary.to_csv(
+    panel_qc_path,
+    index=False
+)
+
+print("\n===== Panel QC summary =====")
+print(panel_qc_summary.to_string(index=False))
+print("\nSaved panel QC summary to:", panel_qc_path)
+
+#补体panel的一个smoke test
+import os
+import numpy as np
+import pandas as pd
+import anndata as ad
+import scipy.sparse as sp
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+
+# ============================================================
+# Config
+# ============================================================
+
+ADATA_PATH = "SEA_AD_microglia_immune.h5ad"
+COUNTS_LAYER = "UMIs"
+
+DONOR_COL = "Donor ID"
+REGION_COL = "Brain Region"
+CELLTYPE_COL = "Supertype"
+BRAAK_COL = "Braak"
+
+PILOT_REGION = "MTG"
+
+TARGET_PANEL_NAME = "complement_phagocytosis"
+
+TARGET_GENES = [
+    "C3", "C1QB", "MSR1", "C1QC", "VSIG4",
+    "CTSS", "C1QA", "FCGR3A", "GRN", "FCER1G", "CD68"
+]
+
+N_HVG = 1000
+N_PCS = 30
+RIDGE_ALPHA = 10.0
+
+MAX_TRAIN_CELLS = 8000
+MAX_TEST_CELLS = 3000
+
+RANDOM_SEED = 42
+
+OUTDIR = "outputs_task3_complement_ridge"
+os.makedirs(OUTDIR, exist_ok=True)
+
+
+# ============================================================
+# Helper functions
+# ============================================================
+
+def to_csr(X):
+    if sp.issparse(X):
+        return X.tocsr()
+    return sp.csr_matrix(X)
+
+
+def normalize_log1p_sparse(X_counts):
+    """
+    Normalize each cell to total 10,000 UMIs, then log1p.
+    X_counts should be cells x genes sparse matrix.
+    """
+    X_counts = to_csr(X_counts).astype(float)
+
+    total_counts = np.asarray(X_counts.sum(axis=1)).ravel()
+    total_counts[total_counts == 0] = np.nan
+
+    scale = 10000.0 / total_counts
+    scale[np.isnan(scale)] = 0.0
+
+    X_norm = X_counts.multiply(scale[:, None]).tocsr()
+    X_norm.data = np.log1p(X_norm.data)
+
+    return X_norm
+
+
+def safe_spearman(x, y):
+    df = pd.DataFrame({"x": x, "y": y}).dropna()
+
+    if df.shape[0] < 3:
+        return np.nan
+
+    if df["x"].nunique() < 2 or df["y"].nunique() < 2:
+        return np.nan
+
+    return df["x"].rank().corr(df["y"].rank())
+
+
+def braak_to_group(x):
+    x = str(x)
+
+    if "0" in x or "II" in x:
+        return "low"
+    if "III" in x or "IV" in x:
+        return "mid"
+    if "V" in x or "VI" in x:
+        return "high"
+
+    return "unknown"
+
+
+# ============================================================
+# 1. Read AnnData
+# ============================================================
+
+print("Reading h5ad...")
+adata = ad.read_h5ad(ADATA_PATH, backed="r")
+
+print(adata)
+print("Cells:", adata.n_obs)
+print("Genes:", adata.n_vars)
+
+
+# ============================================================
+# 2. Select MTG Micro-PVM cells
+# ============================================================
+
+obs = adata.obs.copy()
+
+is_region = obs[REGION_COL].astype(str) == PILOT_REGION
+is_micro_pvm = obs[CELLTYPE_COL].astype(str).str.startswith("Micro-PVM")
+
+pilot_mask = is_region & is_micro_pvm
+pilot_obs = obs.loc[pilot_mask].copy()
+
+print("\nPilot subset:")
+print("Cells:", pilot_obs.shape[0])
+print("Donors:", pilot_obs[DONOR_COL].nunique())
+print("Braak:")
+print(pilot_obs[BRAAK_COL].value_counts(dropna=False).to_string())
+
+pilot_obs.to_csv(
+    os.path.join(OUTDIR, "pilot_obs_mtg_micro_pvm.csv")
+)
+
+
+# ============================================================
+# 3. Donor-wise split
+# ============================================================
+
+donor_table = (
+    pilot_obs[[DONOR_COL, BRAAK_COL]]
+    .drop_duplicates(subset=[DONOR_COL])
+    .copy()
+)
+
+donor_table["braak_group"] = donor_table[BRAAK_COL].apply(braak_to_group)
+
+print("\nDonor Braak group counts:")
+print(donor_table["braak_group"].value_counts().to_string())
+
+train_donors, test_donors = train_test_split(
+    donor_table[DONOR_COL],
+    test_size=0.2,
+    random_state=RANDOM_SEED,
+    stratify=donor_table["braak_group"]
+)
+
+train_donors = set(train_donors)
+test_donors = set(test_donors)
+
+train_cells = pilot_obs.index[pilot_obs[DONOR_COL].isin(train_donors)].to_numpy()
+test_cells = pilot_obs.index[pilot_obs[DONOR_COL].isin(test_donors)].to_numpy()
+
+rng = np.random.default_rng(RANDOM_SEED)
+
+if len(train_cells) > MAX_TRAIN_CELLS:
+    train_cells = rng.choice(train_cells, size=MAX_TRAIN_CELLS, replace=False)
+
+if len(test_cells) > MAX_TEST_CELLS:
+    test_cells = rng.choice(test_cells, size=MAX_TEST_CELLS, replace=False)
+
+selected_cells = np.concatenate([train_cells, test_cells])
+
+split_labels = pd.Series(index=selected_cells, dtype="object")
+split_labels.loc[train_cells] = "train"
+split_labels.loc[test_cells] = "test"
+
+print("\nSmoke-test split:")
+print("Train cells:", len(train_cells))
+print("Test cells:", len(test_cells))
+print("Train donors:", len(train_donors))
+print("Test donors:", len(test_donors))
+
+
+# ============================================================
+# 4. Load selected cells x all genes
+# ============================================================
+
+print("\nLoading selected cells x all genes...")
+
+adata_small = adata[selected_cells, :].to_memory()
+
+if COUNTS_LAYER in adata_small.layers.keys():
+    X_counts = adata_small.layers[COUNTS_LAYER]
+    print("Using layer:", COUNTS_LAYER)
+else:
+    X_counts = adata_small.X
+    print("UMIs layer not found; using adata.X")
+
+X_log = normalize_log1p_sparse(X_counts)
+
+var_names = pd.Index(adata_small.var_names.astype(str))
+
+
+# ============================================================
+# 5. Remove target panel genes from input
+# ============================================================
+
+target_genes_present = [g for g in TARGET_GENES if g in var_names]
+target_idx = [var_names.get_loc(g) for g in target_genes_present]
+
+input_gene_mask = np.ones(len(var_names), dtype=bool)
+input_gene_mask[target_idx] = False
+
+print("\nTarget genes present:")
+print(target_genes_present)
+
+print("Number of input candidate genes after target removal:", input_gene_mask.sum())
+
+
+# ============================================================
+# 6. Select HVGs from target-removed input genes
+# ============================================================
+
+print("\nSelecting HVGs...")
+
+X_input_candidates = X_log[:, input_gene_mask]
+
+gene_means = np.asarray(X_input_candidates.mean(axis=0)).ravel()
+gene_sq_means = np.asarray(X_input_candidates.multiply(X_input_candidates).mean(axis=0)).ravel()
+gene_vars = gene_sq_means - gene_means ** 2
+
+n_hvg = min(N_HVG, X_input_candidates.shape[1])
+
+hvg_local_idx = np.argsort(gene_vars)[-n_hvg:]
+hvg_local_idx = hvg_local_idx[np.argsort(gene_vars[hvg_local_idx])[::-1]]
+
+candidate_gene_names = var_names[input_gene_mask]
+hvg_genes = candidate_gene_names[hvg_local_idx].tolist()
+
+pd.DataFrame({
+    "gene": hvg_genes,
+    "variance": gene_vars[hvg_local_idx]
+}).to_csv(
+    os.path.join(OUTDIR, "selected_hvg_target_removed.csv"),
+    index=False
+)
+
+print("Selected HVGs:", len(hvg_genes))
+
+
+# ============================================================
+# 7. Build X and Y matrices
+# ============================================================
+
+X_hvg = X_input_candidates[:, hvg_local_idx].toarray()
+Y_target = X_log[:, target_idx].toarray()
+
+cell_index = pd.Index(adata_small.obs_names.astype(str))
+
+train_mask = cell_index.isin(train_cells)
+test_mask = cell_index.isin(test_cells)
+
+X_train = X_hvg[train_mask]
+X_test = X_hvg[test_mask]
+
+Y_train = Y_target[train_mask]
+Y_test = Y_target[test_mask]
+
+test_cell_ids = cell_index[test_mask]
+
+print("\nMatrix shapes:")
+print("X_train:", X_train.shape)
+print("X_test:", X_test.shape)
+print("Y_train:", Y_train.shape)
+print("Y_test:", Y_test.shape)
+
+
+# ============================================================
+# 8. PCA + Ridge
+# ============================================================
+
+print("\nTraining PCA + Ridge...")
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+pca = PCA(
+    n_components=min(N_PCS, X_train_scaled.shape[1]),
+    random_state=RANDOM_SEED
+)
+
+Z_train = pca.fit_transform(X_train_scaled)
+Z_test = pca.transform(X_test_scaled)
+
+ridge = Ridge(alpha=RIDGE_ALPHA)
+ridge.fit(Z_train, Y_train)
+
+Y_pred_ridge = ridge.predict(Z_test)
+Y_pred_ridge = np.clip(Y_pred_ridge, 0, None)
+
+
+# ============================================================
+# 9. Baselines
+# ============================================================
+
+# Global gene mean baseline
+global_mean = Y_train.mean(axis=0)
+Y_pred_global = np.tile(global_mean, (Y_test.shape[0], 1))
+
+# Braak group mean baseline
+train_obs_small = adata_small.obs.loc[cell_index[train_mask]].copy()
+test_obs_small = adata_small.obs.loc[cell_index[test_mask]].copy()
+
+train_obs_small["braak_group"] = train_obs_small[BRAAK_COL].apply(braak_to_group)
+test_obs_small["braak_group"] = test_obs_small[BRAAK_COL].apply(braak_to_group)
+
+Y_pred_braak = np.zeros_like(Y_test)
+
+for i, group in enumerate(test_obs_small["braak_group"].values):
+    train_group_mask = train_obs_small["braak_group"].values == group
+
+    if train_group_mask.sum() > 0:
+        Y_pred_braak[i, :] = Y_train[train_group_mask].mean(axis=0)
+    else:
+        Y_pred_braak[i, :] = global_mean
+
+
+# ============================================================
+# 10. Evaluation
+# ============================================================
+
+def evaluate_model(y_true, y_pred, model_name, gene_names):
+    rows = []
+
+    for j, gene in enumerate(gene_names):
+        true = y_true[:, j]
+        pred = y_pred[:, j]
+
+        rows.append({
+            "model": model_name,
+            "panel": TARGET_PANEL_NAME,
+            "gene": gene,
+            "MAE": mean_absolute_error(true, pred),
+            "RMSE": np.sqrt(mean_squared_error(true, pred)),
+            "R2": r2_score(true, pred),
+            "Spearman": safe_spearman(true, pred),
+            "mean_true": np.mean(true),
+            "mean_pred": np.mean(pred),
+        })
+
+    return pd.DataFrame(rows)
+
+
+metrics = pd.concat([
+    evaluate_model(Y_test, Y_pred_global, "global_mean", target_genes_present),
+    evaluate_model(Y_test, Y_pred_braak, "braak_group_mean", target_genes_present),
+    evaluate_model(Y_test, Y_pred_ridge, "ridge_pca", target_genes_present),
+], ignore_index=True)
+
+metrics_path = os.path.join(
+    OUTDIR,
+    "complement_panel_per_gene_metrics.csv"
+)
+
+metrics.to_csv(metrics_path, index=False)
+
+print("\n===== Per-gene metrics =====")
+print(metrics.to_string(index=False))
+print("\nSaved metrics to:", metrics_path)
+
+
+# ============================================================
+# 11. Panel score recovery
+# ============================================================
+
+true_panel_score = Y_test.mean(axis=1)
+pred_global_score = Y_pred_global.mean(axis=1)
+pred_braak_score = Y_pred_braak.mean(axis=1)
+pred_ridge_score = Y_pred_ridge.mean(axis=1)
+
+panel_score_rows = [
+    {
+        "model": "global_mean",
+        "panel": TARGET_PANEL_NAME,
+        "panel_score_spearman": safe_spearman(true_panel_score, pred_global_score),
+        "panel_score_MAE": mean_absolute_error(true_panel_score, pred_global_score),
+    },
+    {
+        "model": "braak_group_mean",
+        "panel": TARGET_PANEL_NAME,
+        "panel_score_spearman": safe_spearman(true_panel_score, pred_braak_score),
+        "panel_score_MAE": mean_absolute_error(true_panel_score, pred_braak_score),
+    },
+    {
+        "model": "ridge_pca",
+        "panel": TARGET_PANEL_NAME,
+        "panel_score_spearman": safe_spearman(true_panel_score, pred_ridge_score),
+        "panel_score_MAE": mean_absolute_error(true_panel_score, pred_ridge_score),
+    },
+]
+
+panel_score_metrics = pd.DataFrame(panel_score_rows)
+
+panel_score_path = os.path.join(
+    OUTDIR,
+    "complement_panel_score_metrics.csv"
+)
+
+panel_score_metrics.to_csv(panel_score_path, index=False)
+
+print("\n===== Panel score metrics =====")
+print(panel_score_metrics.to_string(index=False))
+print("\nSaved panel score metrics to:", panel_score_path)
+
+
+# ============================================================
+# 12. Save prediction table
+# ============================================================
+
+prediction_table = pd.DataFrame({
+    "cell_id": test_cell_ids,
+    "true_panel_score": true_panel_score,
+    "pred_global_score": pred_global_score,
+    "pred_braak_score": pred_braak_score,
+    "pred_ridge_score": pred_ridge_score,
+    "donor": test_obs_small[DONOR_COL].values,
+    "braak": test_obs_small[BRAAK_COL].values,
+    "braak_group": test_obs_small["braak_group"].values,
+    "supertype": test_obs_small[CELLTYPE_COL].values,
+})
+
+prediction_table.to_csv(
+    os.path.join(OUTDIR, "complement_panel_test_predictions.csv"),
+    index=False
+)
+
+print("\nSaved prediction table.")
+
+#换完SVD的新代码
+# ============================================================
+# task3_complement_ridge_smoke.py
+#
+# Goal:
+#   MTG Micro-PVM cells
+#   target-panel-removed HVG
+#   sparse TruncatedSVD embedding
+#   Ridge prediction of complement/phagocytosis panel
+#
+# This is a smoke-test baseline, not the final model.
+# ============================================================
+
+
+# ============================================================
+# 0. Limit CPU threads BEFORE importing numpy / sklearn
+# ============================================================
+
+import os
+
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+
+# ============================================================
+# 1. Imports
+# ============================================================
+
+import json
+import numpy as np
+import pandas as pd
+import anndata as ad
+import scipy.sparse as sp
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import TruncatedSVD
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+
+# ============================================================
+# 2. Config
+# ============================================================
+
+ADATA_PATH = "SEA_AD_microglia_immune.h5ad"
+COUNTS_LAYER = "UMIs"
+
+DONOR_COL = "Donor ID"
+REGION_COL = "Brain Region"
+CELLTYPE_COL = "Supertype"
+BRAAK_COL = "Braak"
+
+PILOT_REGION = "MTG"
+
+TARGET_PANEL_NAME = "complement_phagocytosis"
+
+TARGET_GENES = [
+    "C3",
+    "C1QB",
+    "MSR1",
+    "C1QC",
+    "VSIG4",
+    "CTSS",
+    "C1QA",
+    "FCGR3A",
+    "GRN",
+    "FCER1G",
+    "CD68",
+]
+
+# 小样本 smoke test：先跑通，不要一开始跑太大
+N_HVG = 500
+N_COMPONENTS = 20
+RIDGE_ALPHA = 10.0
+
+MAX_TRAIN_CELLS = 2000
+MAX_TEST_CELLS = 1000
+
+TEST_SIZE = 0.2
+RANDOM_SEED = 42
+
+OUTDIR = "outputs_task3_complement_svd_ridge"
+os.makedirs(OUTDIR, exist_ok=True)
+
+
+# ============================================================
+# 3. Helper functions
+# ============================================================
+
+def to_csr(X):
+    if sp.issparse(X):
+        return X.tocsr()
+    return sp.csr_matrix(X)
+
+
+def normalize_log1p_sparse(X_counts):
+    """
+    Normalize each cell to total 10,000 UMIs, then log1p.
+
+    Input:
+        X_counts: cells x genes count matrix
+
+    Output:
+        sparse log-normalized matrix
+    """
+    X_counts = to_csr(X_counts).astype(float)
+
+    total_counts = np.asarray(X_counts.sum(axis=1)).ravel()
+    total_counts[total_counts == 0] = np.nan
+
+    scale = 10000.0 / total_counts
+    scale[np.isnan(scale)] = 0.0
+
+    X_norm = X_counts.multiply(scale[:, None]).tocsr()
+    X_norm.data = np.log1p(X_norm.data)
+
+    return X_norm
+
+
+def safe_spearman(x, y):
+    df = pd.DataFrame({"x": x, "y": y}).dropna()
+
+    if df.shape[0] < 3:
+        return np.nan
+
+    if df["x"].nunique() < 2:
+        return np.nan
+
+    if df["y"].nunique() < 2:
+        return np.nan
+
+    return df["x"].rank().corr(df["y"].rank())
+
+
+def braak_to_stage(x):
+    """
+    Convert Braak label to numeric stage.
+
+    Examples:
+        Braak 0  -> 0
+        Braak II -> 2
+        Braak V  -> 5
+    """
+    s = str(x).strip()
+    s = s.replace("Braak", "").strip().upper()
+
+    mapping = {
+        "0": 0,
+        "I": 1,
+        "II": 2,
+        "III": 3,
+        "IV": 4,
+        "V": 5,
+        "VI": 6,
+    }
+
+    return mapping.get(s, np.nan)
+
+
+def braak_to_group(x):
+    stage = braak_to_stage(x)
+
+    if pd.isna(stage):
+        return "unknown"
+
+    if stage <= 2:
+        return "low"
+
+    if stage <= 4:
+        return "mid"
+
+    return "high"
+
+
+def evaluate_model(y_true, y_pred, model_name, gene_names):
+    rows = []
+
+    for j, gene in enumerate(gene_names):
+        true = y_true[:, j]
+        pred = y_pred[:, j]
+
+        rows.append({
+            "model": model_name,
+            "panel": TARGET_PANEL_NAME,
+            "gene": gene,
+            "MAE": mean_absolute_error(true, pred),
+            "RMSE": np.sqrt(mean_squared_error(true, pred)),
+            "R2": r2_score(true, pred),
+            "Spearman": safe_spearman(true, pred),
+            "mean_true": float(np.mean(true)),
+            "mean_pred": float(np.mean(pred)),
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ============================================================
+# 4. Save config
+# ============================================================
+
+config = {
+    "ADATA_PATH": ADATA_PATH,
+    "COUNTS_LAYER": COUNTS_LAYER,
+    "PILOT_REGION": PILOT_REGION,
+    "TARGET_PANEL_NAME": TARGET_PANEL_NAME,
+    "TARGET_GENES": TARGET_GENES,
+    "N_HVG": N_HVG,
+    "N_COMPONENTS": N_COMPONENTS,
+    "RIDGE_ALPHA": RIDGE_ALPHA,
+    "MAX_TRAIN_CELLS": MAX_TRAIN_CELLS,
+    "MAX_TEST_CELLS": MAX_TEST_CELLS,
+    "TEST_SIZE": TEST_SIZE,
+    "RANDOM_SEED": RANDOM_SEED,
+}
+
+with open(os.path.join(OUTDIR, "config.json"), "w", encoding="utf-8") as f:
+    json.dump(config, f, indent=2)
+
+
+# ============================================================
+# 5. Read AnnData
+# ============================================================
+
+print("Reading h5ad...", flush=True)
+
+adata = ad.read_h5ad(
+    ADATA_PATH,
+    backed="r"
+)
+
+print(adata, flush=True)
+print("Total cells:", adata.n_obs, flush=True)
+print("Total genes:", adata.n_vars, flush=True)
+
+
+# ============================================================
+# 6. Select MTG Micro-PVM cells
+# ============================================================
+
+print("\nSelecting pilot subset...", flush=True)
+
+obs = adata.obs.copy()
+
+obs[DONOR_COL] = obs[DONOR_COL].astype(str)
+obs[REGION_COL] = obs[REGION_COL].astype(str)
+obs[CELLTYPE_COL] = obs[CELLTYPE_COL].astype(str)
+obs[BRAAK_COL] = obs[BRAAK_COL].astype(str)
+
+is_region = obs[REGION_COL] == PILOT_REGION
+is_micro_pvm = obs[CELLTYPE_COL].str.startswith("Micro-PVM")
+
+pilot_mask = is_region & is_micro_pvm
+pilot_obs = obs.loc[pilot_mask].copy()
+
+pilot_obs["braak_stage"] = pilot_obs[BRAAK_COL].apply(braak_to_stage)
+pilot_obs["braak_group"] = pilot_obs[BRAAK_COL].apply(braak_to_group)
+
+print("Pilot cells:", pilot_obs.shape[0], flush=True)
+print("Pilot donors:", pilot_obs[DONOR_COL].nunique(), flush=True)
+
+print("\nPilot Braak counts:", flush=True)
+print(pilot_obs[BRAAK_COL].value_counts(dropna=False).to_string(), flush=True)
+
+print("\nPilot supertype counts:", flush=True)
+print(pilot_obs[CELLTYPE_COL].value_counts(dropna=False).to_string(), flush=True)
+
+pilot_obs.to_csv(
+    os.path.join(OUTDIR, "pilot_obs_mtg_micro_pvm.csv"),
+    index=True
+)
+
+
+# ============================================================
+# 7. Donor-wise train/test split
+# ============================================================
+
+print("\nCreating donor-wise train/test split...", flush=True)
+
+donor_table = (
+    pilot_obs[[DONOR_COL, BRAAK_COL, "braak_stage", "braak_group"]]
+    .drop_duplicates(subset=[DONOR_COL])
+    .copy()
+)
+
+print("\nDonor Braak group counts:", flush=True)
+print(donor_table["braak_group"].value_counts(dropna=False).to_string(), flush=True)
+
+stratify_labels = donor_table["braak_group"]
+
+if stratify_labels.value_counts().min() < 2:
+    print("\nWarning: some Braak groups have <2 donors. Using unstratified split.", flush=True)
+    stratify_arg = None
+else:
+    stratify_arg = stratify_labels
+
+train_donors_arr, test_donors_arr = train_test_split(
+    donor_table[DONOR_COL].values,
+    test_size=TEST_SIZE,
+    random_state=RANDOM_SEED,
+    stratify=stratify_arg,
+)
+
+train_donors = set(map(str, train_donors_arr))
+test_donors = set(map(str, test_donors_arr))
+
+donor_table["split"] = donor_table[DONOR_COL].apply(
+    lambda d: "train" if d in train_donors else "test"
+)
+
+donor_table.to_csv(
+    os.path.join(OUTDIR, "donor_split.csv"),
+    index=False
+)
+
+train_cells_all = pilot_obs.index[pilot_obs[DONOR_COL].isin(train_donors)].astype(str).to_numpy()
+test_cells_all = pilot_obs.index[pilot_obs[DONOR_COL].isin(test_donors)].astype(str).to_numpy()
+
+rng = np.random.default_rng(RANDOM_SEED)
+
+if MAX_TRAIN_CELLS is not None and len(train_cells_all) > MAX_TRAIN_CELLS:
+    train_cells = rng.choice(train_cells_all, size=MAX_TRAIN_CELLS, replace=False)
+else:
+    train_cells = train_cells_all
+
+if MAX_TEST_CELLS is not None and len(test_cells_all) > MAX_TEST_CELLS:
+    test_cells = rng.choice(test_cells_all, size=MAX_TEST_CELLS, replace=False)
+else:
+    test_cells = test_cells_all
+
+selected_cells = np.concatenate([train_cells, test_cells])
+
+print("\nSmoke-test split:", flush=True)
+print("Train donors:", len(train_donors), flush=True)
+print("Test donors:", len(test_donors), flush=True)
+print("Train cells before sampling:", len(train_cells_all), flush=True)
+print("Test cells before sampling:", len(test_cells_all), flush=True)
+print("Train cells used:", len(train_cells), flush=True)
+print("Test cells used:", len(test_cells), flush=True)
+
+
+# ============================================================
+# 8. Load selected cells x all genes
+# ============================================================
+
+print("\nLoading selected cells x all genes...", flush=True)
+
+adata_small = adata[selected_cells, :].to_memory()
+
+if COUNTS_LAYER in adata_small.layers.keys():
+    X_counts = adata_small.layers[COUNTS_LAYER]
+    print("Using count layer:", COUNTS_LAYER, flush=True)
+else:
+    X_counts = adata_small.X
+    print("Warning: UMIs layer not found. Using adata.X.", flush=True)
+
+X_log = normalize_log1p_sparse(X_counts)
+
+var_names = pd.Index(adata_small.var_names.astype(str))
+cell_index = pd.Index(adata_small.obs_names.astype(str))
+
+train_mask = cell_index.isin(train_cells)
+test_mask = cell_index.isin(test_cells)
+
+print("Loaded matrix shape:", X_log.shape, flush=True)
+print("Train mask cells:", int(train_mask.sum()), flush=True)
+print("Test mask cells:", int(test_mask.sum()), flush=True)
+
+
+# ============================================================
+# 9. Remove target panel genes from input
+# ============================================================
+
+print("\nRemoving target panel genes from input...", flush=True)
+
+target_genes_present = [g for g in TARGET_GENES if g in var_names]
+missing_target_genes = [g for g in TARGET_GENES if g not in var_names]
+
+if len(target_genes_present) == 0:
+    raise ValueError("None of the target genes were found in adata.var_names.")
+
+target_idx = [var_names.get_loc(g) for g in target_genes_present]
+
+input_gene_mask = np.ones(len(var_names), dtype=bool)
+input_gene_mask[target_idx] = False
+
+print("Target genes present:", target_genes_present, flush=True)
+print("Target genes missing:", missing_target_genes, flush=True)
+print("Input candidate genes after target removal:", int(input_gene_mask.sum()), flush=True)
+
+
+# ============================================================
+# 10. Select HVGs using TRAIN CELLS ONLY
+# ============================================================
+
+print("\nSelecting HVGs from train cells only...", flush=True)
+
+X_input_candidates = X_log[:, input_gene_mask]
+X_train_candidates = X_input_candidates[train_mask, :]
+
+gene_means = np.asarray(X_train_candidates.mean(axis=0)).ravel()
+gene_sq_means = np.asarray(
+    X_train_candidates.multiply(X_train_candidates).mean(axis=0)
+).ravel()
+
+gene_vars = gene_sq_means - gene_means ** 2
+
+n_hvg = min(N_HVG, X_train_candidates.shape[1])
+
+hvg_local_idx = np.argsort(gene_vars)[-n_hvg:]
+hvg_local_idx = hvg_local_idx[np.argsort(gene_vars[hvg_local_idx])[::-1]]
+
+candidate_gene_names = var_names[input_gene_mask]
+hvg_genes = candidate_gene_names[hvg_local_idx].tolist()
+
+hvg_table = pd.DataFrame({
+    "gene": hvg_genes,
+    "train_variance": gene_vars[hvg_local_idx],
+})
+
+hvg_table.to_csv(
+    os.path.join(OUTDIR, "selected_hvg_target_removed_train_only.csv"),
+    index=False
+)
+
+print("Selected HVGs:", len(hvg_genes), flush=True)
+
+
+# ============================================================
+# 11. Build X and Y matrices
+# ============================================================
+
+print("\nBuilding X and Y matrices...", flush=True)
+
+# X remains sparse
+X_hvg = X_input_candidates[:, hvg_local_idx].tocsr()
+
+# Y is small: target genes only, safe to make dense
+Y_target = X_log[:, target_idx].toarray()
+
+X_train = X_hvg[train_mask, :]
+X_test = X_hvg[test_mask, :]
+
+Y_train = Y_target[train_mask, :]
+Y_test = Y_target[test_mask, :]
+
+test_cell_ids = cell_index[test_mask]
+
+print("X_train:", X_train.shape, flush=True)
+print("X_test:", X_test.shape, flush=True)
+print("Y_train:", Y_train.shape, flush=True)
+print("Y_test:", Y_test.shape, flush=True)
+
+
+# ============================================================
+# 12. Sparse TruncatedSVD + Ridge
+# ============================================================
+
+print("\nTraining sparse TruncatedSVD + Ridge...", flush=True)
+
+scaler = StandardScaler(with_mean=False)
+
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+svd = TruncatedSVD(
+    n_components=min(N_COMPONENTS, X_train_scaled.shape[1] - 1),
+    random_state=RANDOM_SEED,
+)
+
+Z_train = svd.fit_transform(X_train_scaled)
+Z_test = svd.transform(X_test_scaled)
+
+print("SVD embedding train shape:", Z_train.shape, flush=True)
+print("SVD embedding test shape:", Z_test.shape, flush=True)
+print("SVD explained variance ratio sum:", float(svd.explained_variance_ratio_.sum()), flush=True)
+
+ridge = Ridge(alpha=RIDGE_ALPHA)
+ridge.fit(Z_train, Y_train)
+
+Y_pred_svd_ridge = ridge.predict(Z_test)
+Y_pred_svd_ridge = np.clip(Y_pred_svd_ridge, 0, None)
+
+print("Finished SVD + Ridge.", flush=True)
+
+
+# ============================================================
+# 13. Baselines
+# ============================================================
+
+print("\nRunning baselines...", flush=True)
+
+# Baseline 1: global mean
+global_mean = Y_train.mean(axis=0)
+Y_pred_global = np.tile(global_mean, (Y_test.shape[0], 1))
+
+# Baseline 2: Braak group mean
+train_obs_small = adata_small.obs.loc[cell_index[train_mask]].copy()
+test_obs_small = adata_small.obs.loc[cell_index[test_mask]].copy()
+
+train_obs_small[DONOR_COL] = train_obs_small[DONOR_COL].astype(str)
+test_obs_small[DONOR_COL] = test_obs_small[DONOR_COL].astype(str)
+
+train_obs_small["braak_group"] = train_obs_small[BRAAK_COL].apply(braak_to_group)
+test_obs_small["braak_group"] = test_obs_small[BRAAK_COL].apply(braak_to_group)
+
+Y_pred_braak = np.zeros_like(Y_test)
+
+for i, group in enumerate(test_obs_small["braak_group"].values):
+    train_group_mask = train_obs_small["braak_group"].values == group
+
+    if train_group_mask.sum() > 0:
+        Y_pred_braak[i, :] = Y_train[train_group_mask].mean(axis=0)
+    else:
+        Y_pred_braak[i, :] = global_mean
+
+
+# ============================================================
+# 14. Per-gene evaluation
+# ============================================================
+
+print("\nEvaluating per-gene metrics...", flush=True)
+
+metrics = pd.concat(
+    [
+        evaluate_model(Y_test, Y_pred_global, "global_mean", target_genes_present),
+        evaluate_model(Y_test, Y_pred_braak, "braak_group_mean", target_genes_present),
+        evaluate_model(Y_test, Y_pred_svd_ridge, "svd_ridge", target_genes_present),
+    ],
+    ignore_index=True,
+)
+
+metrics_path = os.path.join(
+    OUTDIR,
+    "complement_panel_per_gene_metrics.csv"
+)
+
+metrics.to_csv(metrics_path, index=False)
+
+print("\n===== Per-gene metrics =====", flush=True)
+print(metrics.to_string(index=False), flush=True)
+print("\nSaved per-gene metrics to:", metrics_path, flush=True)
+
+
+# ============================================================
+# 15. Panel score recovery
+# ============================================================
+
+print("\nEvaluating panel score recovery...", flush=True)
+
+true_panel_score = Y_test.mean(axis=1)
+pred_global_score = Y_pred_global.mean(axis=1)
+pred_braak_score = Y_pred_braak.mean(axis=1)
+pred_svd_ridge_score = Y_pred_svd_ridge.mean(axis=1)
+
+panel_score_metrics = pd.DataFrame([
+    {
+        "model": "global_mean",
+        "panel": TARGET_PANEL_NAME,
+        "panel_score_spearman": safe_spearman(true_panel_score, pred_global_score),
+        "panel_score_MAE": mean_absolute_error(true_panel_score, pred_global_score),
+        "true_score_mean": float(np.mean(true_panel_score)),
+        "pred_score_mean": float(np.mean(pred_global_score)),
+    },
+    {
+        "model": "braak_group_mean",
+        "panel": TARGET_PANEL_NAME,
+        "panel_score_spearman": safe_spearman(true_panel_score, pred_braak_score),
+        "panel_score_MAE": mean_absolute_error(true_panel_score, pred_braak_score),
+        "true_score_mean": float(np.mean(true_panel_score)),
+        "pred_score_mean": float(np.mean(pred_braak_score)),
+    },
+    {
+        "model": "svd_ridge",
+        "panel": TARGET_PANEL_NAME,
+        "panel_score_spearman": safe_spearman(true_panel_score, pred_svd_ridge_score),
+        "panel_score_MAE": mean_absolute_error(true_panel_score, pred_svd_ridge_score),
+        "true_score_mean": float(np.mean(true_panel_score)),
+        "pred_score_mean": float(np.mean(pred_svd_ridge_score)),
+    },
+])
+
+panel_score_path = os.path.join(
+    OUTDIR,
+    "complement_panel_score_metrics.csv"
+)
+
+panel_score_metrics.to_csv(panel_score_path, index=False)
+
+print("\n===== Panel score metrics =====", flush=True)
+print(panel_score_metrics.to_string(index=False), flush=True)
+print("\nSaved panel score metrics to:", panel_score_path, flush=True)
+
+
+# ============================================================
+# 16. Save test prediction table
+# ============================================================
+
+print("\nSaving prediction table...", flush=True)
+
+prediction_table = pd.DataFrame({
+    "cell_id": test_cell_ids,
+    "true_panel_score": true_panel_score,
+    "pred_global_score": pred_global_score,
+    "pred_braak_score": pred_braak_score,
+    "pred_svd_ridge_score": pred_svd_ridge_score,
+    "donor": test_obs_small[DONOR_COL].values,
+    "braak": test_obs_small[BRAAK_COL].values,
+    "braak_group": test_obs_small["braak_group"].values,
+    "supertype": test_obs_small[CELLTYPE_COL].values,
+})
+
+prediction_path = os.path.join(
+    OUTDIR,
+    "complement_panel_test_predictions.csv"
+)
+
+prediction_table.to_csv(
+    prediction_path,
+    index=False
+)
+
+print("Saved prediction table to:", prediction_path, flush=True)
+
+
+# ============================================================
+# 17. Done
+# ============================================================
+
+print("\nDone.", flush=True)
+
+
+
+
+
+
+
+
+
+
+
